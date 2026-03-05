@@ -1,15 +1,13 @@
 import { NextResponse } from 'next/server'
+import { getQAMetricsCache } from '@/lib/qa-cache'
 
 // This endpoint transforms the cached QA metrics into the dashboard format
 export async function GET() {
   try {
-    // Fetch from the cache endpoint
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
-    const response = await fetch(`${baseUrl}/api/qa-metrics`, {
-      cache: 'no-store',
-    })
-
-    if (!response.ok) {
+    const cachedData = getQAMetricsCache()
+    
+    // Check if we have cached data
+    if (!cachedData) {
       // Return empty/default data if no cache available
       return NextResponse.json({
         metrics: {
@@ -47,8 +45,8 @@ export async function GET() {
       })
     }
 
-    const { data } = await response.json()
-    const { output, critical_qa_wip_tickets, old_qa_wip_tickets } = data
+    // Extract data from cache
+    const { output, critical_qa_wip_tickets, old_qa_wip_tickets } = cachedData
 
     // Transform to dashboard format
     const dashboardData = {

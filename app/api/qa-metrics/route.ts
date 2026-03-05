@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-
-// In-memory cache for QA metrics (resets on server restart)
-let qaMetricsCache: any = null
-let cacheTimestamp: number = 0
+import { setQAMetricsCache, getQAMetricsCache, getCacheTimestamp } from '@/lib/qa-cache'
 
 export async function POST(request: NextRequest) {
   try {
@@ -65,7 +62,7 @@ export async function POST(request: NextRequest) {
     console.log('⏰ [QA Metrics] Old tickets:', old_qa_wip_tickets?.length || 0)
 
     // Store in cache
-    qaMetricsCache = {
+    const cacheData = {
       output,
       last_30_business_days,
       critical_qa_wip_tickets,
@@ -73,9 +70,9 @@ export async function POST(request: NextRequest) {
       googleDocFile,
       receivedAt: new Date().toISOString(),
     }
-    cacheTimestamp = Date.now()
+    setQAMetricsCache(cacheData)
 
-    console.log('💾 [QA Metrics] Data cached successfully at:', qaMetricsCache.receivedAt)
+    console.log('💾 [QA Metrics] Data cached successfully at:', cacheData.receivedAt)
 
     return NextResponse.json({
       success: true,
@@ -85,7 +82,7 @@ export async function POST(request: NextRequest) {
       assigneeCount: output.people?.length || 0,
       criticalTicketsCount: critical_qa_wip_tickets?.length || 0,
       oldTicketsCount: old_qa_wip_tickets?.length || 0,
-      cachedAt: qaMetricsCache.receivedAt,
+      cachedAt: cacheData.receivedAt,
     })
   } catch (error) {
     console.error('❌ [QA Metrics] Error processing QA metrics:', error)
@@ -105,7 +102,8 @@ export async function GET(request: NextRequest) {
   try {
     console.log('📤 [QA Metrics] GET request received at:', new Date().toISOString())
     
-    if (!qaMetricsCache) {
+    const cachedData = getQAMetricsCache()
+    if (!cachedData) {
       console.log('⚠️ [QA Metrics] No cached data available')
       return NextResponse.json(
         { 
@@ -117,18 +115,19 @@ export async function GET(request: NextRequest) {
     }
 
     // Calculate cache age
-    const cacheAgeMinutes = Math.floor((Date.now() - cacheTimestamp) / 1000 / 60)
+    const timestamp = getCacheTimestamp()
+    const cacheAgeMinutes = Math.floor((Date.now() - timestamp) / 1000 / 60)
     const cacheAgeHours = Math.floor(cacheAgeMinutes / 60)
 
     console.log('✅ [QA Metrics] Returning cached data')
     console.log('⏱️ [QA Metrics] Cache age:', cacheAgeMinutes, 'minutes')
-    console.log('📅 [QA Metrics] Cached at:', qaMetricsCache.receivedAt)
+    console.log('📅 [QA Metrics] Cached at:', cachedData.receivedAt)
 
     return NextResponse.json({
       success: true,
-      data: qaMetricsCache,
+      data: cachedData,
       cacheInfo: {
-        cachedAt: qaMetricsCache.receivedAt,
+        cachedAt: cachedData.receivedAt,
         ageMinutes: cacheAgeMinutes,
         ageHours: cacheAgeHours,
       },
