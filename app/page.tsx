@@ -3,13 +3,6 @@
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { PaceDashboardTab } from "@/components/pace-dashboard"
 import {
-  qaSnapshotMetrics,
-  criticalTickets,
-  agingTickets,
-  dailyPerformance,
-  teamMemberPerformance,
-  allTeamMembers,
-  allStatuses,
   docSnapshotMetrics,
   docCriticalTickets,
   docAgingTickets,
@@ -22,10 +15,8 @@ import {
   crDailyPerformance,
   crTeamMemberPerformance,
   crAllStatuses,
-  qaAIInsights,
   docAIInsights,
   crAIInsights,
-  escapedBugsData,
 } from "@/lib/dashboard-data"
 import { TripsSummary } from "@/components/trips-summary"
 import { DataModel } from "@/components/data-model"
@@ -33,8 +24,28 @@ import { InfrastructureDashboard } from "@/components/infrastructure-dashboard"
 import { SupportDashboard } from "@/components/support-dashboard"
 import { ClientKnowledgeDashboard } from "@/components/client-knowledge-dashboard"
 import { ShieldCheck, FileText, GitPullRequest, Layers, Database, Server, Headphones, BookOpen } from "lucide-react"
+import { useEffect, useState } from "react"
 
 export default function DashboardPage() {
+  const [qaData, setQaData] = useState<any>(null)
+  const [qaLoading, setQaLoading] = useState(true)
+
+  useEffect(() => {
+    async function fetchQAData() {
+      try {
+        const response = await fetch('/api/dashboard/qa-live')
+        if (response.ok) {
+          const data = await response.json()
+          setQaData(data)
+        }
+      } catch (error) {
+        console.error('Failed to fetch QA data:', error)
+      } finally {
+        setQaLoading(false)
+      }
+    }
+    fetchQAData()
+  }, [])
   return (
     <main className="min-h-screen bg-background">
       {/* Header */}
@@ -98,26 +109,37 @@ export default function DashboardPage() {
 
           {/* QA PACE Tab */}
           <TabsContent value="qa">
-            <PaceDashboardTab
-              label="QA"
-              dashboardType="qa"
-              metrics={qaSnapshotMetrics}
-              criticalTickets={criticalTickets}
-              agingTickets={agingTickets}
-              dailyPerformance={dailyPerformance}
-              teamMembers={teamMemberPerformance}
-              allMembers={allTeamMembers}
-              allStatuses={allStatuses}
-              paceLabel="QA PACE"
-              volumeLabel="Assigned to QA Volume (Last 7 Days)"
-              qCycleLabel="Q-Cycle (To Q.A)"
-              rAgeLabel="R-Age Cycle Time (QA Pushback)"
-              performanceTitle="Daily QA Performance"
-              agingTableTitle="Aging in QA (Age > 3 BD)"
-              aiInsights={qaAIInsights}
-              escapedBugs={escapedBugsData}
-              showEscapedBugs={true}
-            />
+            {qaLoading ? (
+              <div className="flex items-center justify-center h-96">
+                <p className="text-muted-foreground">Loading QA data...</p>
+              </div>
+            ) : qaData ? (
+              <PaceDashboardTab
+                label="QA"
+                dashboardType="qa"
+                metrics={qaData.metrics}
+                criticalTickets={qaData.criticalTickets}
+                agingTickets={qaData.agingTickets}
+                dailyPerformance={qaData.dailyPerformance}
+                teamMembers={qaData.teamMembers}
+                allMembers={qaData.allMembers}
+                allStatuses={qaData.allStatuses}
+                paceLabel="QA PACE"
+                volumeLabel="Assigned to QA Volume (Last 7 Days)"
+                qCycleLabel="Q-Cycle (To Q.A)"
+                rAgeLabel="R-Age Cycle Time (QA Pushback)"
+                performanceTitle="Daily QA Performance"
+                agingTableTitle="Aging in QA (Age > 3 BD)"
+                aiInsights={qaData.aiInsights || []}
+                escapedBugs={qaData.escapedBugs || []}
+                showEscapedBugs={true}
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-96 gap-4">
+                <p className="text-muted-foreground">No QA data available</p>
+                <p className="text-sm text-muted-foreground">{qaData?.message || 'Waiting for data from n8n workflow'}</p>
+              </div>
+            )}
           </TabsContent>
 
           {/* Documentation PACE Tab */}
