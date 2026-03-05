@@ -8,10 +8,12 @@ export async function POST(request: NextRequest) {
   try {
     console.log('📥 [QA Metrics] POST request received at:', new Date().toISOString())
     console.log('📥 [QA Metrics] Request headers:', Object.fromEntries(request.headers))
+    console.log('📥 [QA Metrics] Content-Type:', request.headers.get('content-type'))
     
     const payload = await request.json()
     console.log('📦 [QA Metrics] Received payload type:', Array.isArray(payload) ? 'Array' : typeof payload)
-    console.log('📦 [QA Metrics] Payload structure:', JSON.stringify(payload).substring(0, 200) + '...')
+    console.log('📦 [QA Metrics] Payload keys:', typeof payload === 'object' ? Object.keys(payload) : 'N/A')
+    console.log('📦 [QA Metrics] Full payload:', JSON.stringify(payload, null, 2))
 
     let metricsData, googleDocFile
 
