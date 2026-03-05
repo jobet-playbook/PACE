@@ -138,7 +138,7 @@ export async function GET() {
         dailyRhythm: person.activitySummary.summaryText,
         activities: person.today_tickets?.map((ticket: any) => ({
           ticketKey: ticket.ticket_id,
-          sp: ticket.story_points,
+          sp: ticket.story_points || 0,
           type: ticket.pass_type === 'first_time_pass' ? 'First Pass' : 'Repeat Pass',
           time: ticket.completed_time_et,
           description: ticket.recap,
