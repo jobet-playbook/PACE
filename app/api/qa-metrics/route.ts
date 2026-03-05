@@ -22,7 +22,22 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const [metricsData, googleDocFile] = data
+    // Handle new format: [{ data: [...] }] or old format: [metricsData, googleDocFile]
+    let metricsData, googleDocFile
+    
+    if (data[0]?.data && Array.isArray(data[0].data)) {
+      // New format: [{ data: [metricsData, googleDocFile] }]
+      console.log('📦 [QA Metrics] Detected new format with data wrapper')
+      const innerData = data[0].data
+      metricsData = innerData[0]
+      googleDocFile = innerData[1]
+    } else {
+      // Old format: [metricsData, googleDocFile]
+      console.log('📦 [QA Metrics] Detected old format')
+      metricsData = data[0]
+      googleDocFile = data[1]
+    }
+    
     console.log('📊 [QA Metrics] Metrics data keys:', Object.keys(metricsData || {}))
     console.log('📄 [QA Metrics] Google Doc file:', googleDocFile?.name || 'Not provided')
 
