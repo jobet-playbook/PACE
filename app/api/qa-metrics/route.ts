@@ -9,33 +9,36 @@ export async function POST(request: NextRequest) {
     console.log('📥 [QA Metrics] POST request received at:', new Date().toISOString())
     console.log('📥 [QA Metrics] Request headers:', Object.fromEntries(request.headers))
     
-    const data = await request.json()
-    console.log('📦 [QA Metrics] Received data type:', Array.isArray(data) ? 'Array' : typeof data)
-    console.log('📦 [QA Metrics] Data length:', Array.isArray(data) ? data.length : 'N/A')
+    const payload = await request.json()
+    console.log('📦 [QA Metrics] Received payload type:', Array.isArray(payload) ? 'Array' : typeof payload)
+    console.log('📦 [QA Metrics] Payload structure:', JSON.stringify(payload).substring(0, 200) + '...')
 
-    // Validate that we have the expected data structure
-    if (!Array.isArray(data) || data.length === 0) {
-      console.error('❌ [QA Metrics] Invalid data format - not an array or empty')
+    let metricsData, googleDocFile
+
+    // Handle different payload formats
+    if (payload?.data && Array.isArray(payload.data)) {
+      // Format: { data: [metricsData, googleDocFile] }
+      console.log('📦 [QA Metrics] Detected format: { data: [...] }')
+      metricsData = payload.data[0]
+      googleDocFile = payload.data[1]
+    } else if (Array.isArray(payload) && payload.length > 0) {
+      if (payload[0]?.data && Array.isArray(payload[0].data)) {
+        // Format: [{ data: [metricsData, googleDocFile] }]
+        console.log('📦 [QA Metrics] Detected format: [{ data: [...] }]')
+        metricsData = payload[0].data[0]
+        googleDocFile = payload[0].data[1]
+      } else {
+        // Format: [metricsData, googleDocFile]
+        console.log('📦 [QA Metrics] Detected format: [metricsData, googleDocFile]')
+        metricsData = payload[0]
+        googleDocFile = payload[1]
+      }
+    } else {
+      console.error('❌ [QA Metrics] Invalid data format')
       return NextResponse.json(
-        { error: 'Invalid data format. Expected an array with at least one element.' },
+        { error: 'Invalid data format. Expected { data: [...] } or array format.' },
         { status: 400 }
       )
-    }
-
-    // Handle new format: [{ data: [...] }] or old format: [metricsData, googleDocFile]
-    let metricsData, googleDocFile
-    
-    if (data[0]?.data && Array.isArray(data[0].data)) {
-      // New format: [{ data: [metricsData, googleDocFile] }]
-      console.log('📦 [QA Metrics] Detected new format with data wrapper')
-      const innerData = data[0].data
-      metricsData = innerData[0]
-      googleDocFile = innerData[1]
-    } else {
-      // Old format: [metricsData, googleDocFile]
-      console.log('📦 [QA Metrics] Detected old format')
-      metricsData = data[0]
-      googleDocFile = data[1]
     }
     
     console.log('📊 [QA Metrics] Metrics data keys:', Object.keys(metricsData || {}))
