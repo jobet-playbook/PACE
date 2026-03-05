@@ -51,24 +51,40 @@ export async function GET() {
     // Transform to dashboard format
     const dashboardData = {
       metrics: {
-        spThroughputLast7: output.today_overview.total_story_points,
-        spThroughputLast7Delta: 0,
-        spThroughputLast28: 0,
-        spThroughputLast28Delta: 0,
-        paceLast7: output.today_overview.repeat_percentage,
-        paceLast28: 0,
-        assignedVolumeTotalTickets: critical_qa_wip_tickets?.length + old_qa_wip_tickets?.length || 0,
-        assignedVolumeTotalSP: 0,
-        assignedVolumeAgingOver7: old_qa_wip_tickets?.length || 0,
-        qCycleLast7: 0,
-        qCycleLast28: 0,
-        tCycleLast7: 0,
-        tCycleLast28: 0,
-        rAgeCycleLast7: 0,
-        rAgeCycleLast28: 0,
+        spThroughput: {
+          last7: output.today_overview.total_story_points,
+          last7Delta: 0,
+          last28: 0,
+          last28Delta: 0,
+          prior7: output.last_business_day_overview.total_story_points,
+          prior28: 0,
+        },
+        pace: {
+          last7: output.today_overview.repeat_percentage,
+          last28: 0,
+        },
+        assignedVolume: {
+          totalTickets: (critical_qa_wip_tickets?.length || 0) + (old_qa_wip_tickets?.length || 0),
+          totalSP: 0,
+          agingOver7: old_qa_wip_tickets?.length || 0,
+        },
+        qCycle: {
+          last7: 0,
+          last28: 0,
+        },
+        tCycle: {
+          last7: 0,
+          last28: 0,
+        },
+        rAgeCycle: {
+          last7: 0,
+          last28: 0,
+        },
         escapedDefects: 0,
-        critBugsOpen: critical_qa_wip_tickets?.length || 0,
-        critBugsResolved: 0,
+        critBugs: {
+          open: critical_qa_wip_tickets?.length || 0,
+          resolved: 0,
+        },
       },
       criticalTickets: critical_qa_wip_tickets?.map((ticket: any) => ({
         key: ticket.ticket_key,
