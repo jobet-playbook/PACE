@@ -1,0 +1,247 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Ticket {
+  id           String   @id @default(cuid())
+  key          String   @unique
+  recentAge    Int
+  age          Int
+  sp           Int?
+  assignee     String
+  developer    String
+  returnCount  Int
+  firstQA      String
+  latestQA     String
+  status       String
+  summary      String
+  dashboardType String
+  ticketType   String // "critical" or "aging"
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([dashboardType])
+  @@index([ticketType])
+  @@index([assignee])
+}
+
+model TeamMember {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  dashboardType String
+  todayTickets  Int      @default(0)
+  todaySP       Int      @default(0)
+  todayFirstPass Int     @default(0)
+  todayFirstPassSP Int   @default(0)
+  todayRepeatPass Int    @default(0)
+  todayRepeatPassSP Int  @default(0)
+  todayChurn    Int      @default(0)
+  weeklyTickets Int      @default(0)
+  weeklySP      Int      @default(0)
+  weeklyFirstPass Int    @default(0)
+  weeklyRepeatPass Int   @default(0)
+  weeklyAvgCycleTime Float @default(0)
+  monthlyTickets Int     @default(0)
+  monthlySP     Int      @default(0)
+  monthlyFirstPass Int   @default(0)
+  monthlyRepeatPass Int  @default(0)
+  monthlyAvgCycleTime Float @default(0)
+  dailyRhythm   String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  activities    Activity[]
+
+  @@index([dashboardType])
+}
+
+model Activity {
+  id          String   @id @default(cuid())
+  ticketKey   String
+  sp          Int
+  type        String
+  time        String
+  description String
+  memberId    String
+  member      TeamMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@index([memberId])
+}
+
+model Metrics {
+  id                String   @id @default(cuid())
+  dashboardType     String   @unique
+  spThroughputLast7 Int
+  spThroughputLast7Delta Int
+  spThroughputLast28 Int
+  spThroughputLast28Delta Int
+  spThroughputPrior7 Int
+  spThroughputPrior28 Int
+  paceLast7         Float
+  paceLast28        Float
+  assignedVolumeTotalTickets Int
+  assignedVolumeTotalSP Int
+  assignedVolumeAgingOver7 Int
+  qCycleLast7       Float
+  qCycleLast28      Float
+  tCycleLast7       Float?
+  tCycleLast28      Float
+  rAgeCycleLast7    Float
+  rAgeCycleLast28   Float
+  escapedDefects    Int
+  critBugsOpen      Int
+  critBugsResolved  Int
+  updatedAt         DateTime @updatedAt
+
+  @@index([dashboardType])
+}
+
+model AIInsight {
+  id            String   @id @default(cuid())
+  dashboardType String
+  category      String
+  severity      String
+  title         String
+  description   String
+  affectedMembers String
+  recommendation String
+  createdAt     DateTime @default(now())
+
+  @@index([dashboardType])
+  @@index([severity])
+}
+
+model EscapedBug {
+  id            String   @id @default(cuid())
+  ticketKey     String   @unique
+  summary       String
+  escapedFrom   String
+  detectedIn    String
+  assignee      String
+  severity      String
+  rootCause     String
+  createdAt     DateTime @default(now())
+
+  @@index([severity])
+}
+
+model QAMetrics {
+  id                          String   @id @default(cuid())
+  reportDate                  String
+  reportType                  String
+  generatedAt                 String
+  todayLabel                  String
+  lastBusinessDayLabel        String
+  
+  // Today overview
+  todayTotalTickets           Int
+  todayTotalStoryPoints       Int
+  todayRepeatPercentage       Float
+  todayFirstTimeTickets       Int
+  todayFirstTimeStoryPoints   Int
+  todayRepeatPassTickets      Int
+  todayRepeatPassStoryPoints  Int
+  
+  // Last business day overview
+  lastDayTotalTickets         Int
+  lastDayTotalStoryPoints     Int
+  lastDayRepeatPercentage     Float
+  lastDayFirstTimeTickets     Int
+  lastDayFirstTimeStoryPoints Int
+  lastDayRepeatPassTickets    Int
+  lastDayRepeatPassStoryPoints Int
+  
+  // JSON data fields
+  peopleData                  String   @default("")
+  last30DaysData              String   @default("")
+  criticalWipTickets          String   @default("")
+  oldWipTickets               String   @default("")
+  htmlReport                  String   @default("")
+  
+  // Google Doc metadata
+  googleDocId                 String?
+  googleDocName               String?
+  
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+  
+  // Relations
+  assigneePerformance         QAAssigneePerformance[]
+  wipTickets                  QAWIPTicket[]
+  
+  @@index([reportDate])
+}
+
+model QAAssigneePerformance {
+  id                      String   @id @default(cuid())
+  qaMetricsId             String
+  qaAssignee              String
+  personName              String
+  
+  // Today stats
+  todayTicketCount        Int
+  todayStoryPoints        Int
+  todayFirstTimeCount     Int
+  todayRepeatCount        Int
+  todayRepeatPercentage   Float
+  
+  // Last business day stats
+  lastDayTicketCount      Int
+  lastDayStoryPoints      Int
+  lastDayFirstTimeCount   Int
+  lastDayRepeatCount      Int
+  lastDayRepeatPercentage Float
+  
+  // Activity summary
+  totalActions            Int
+  firstActionTime         String
+  lastActionTime          String
+  summaryText             String
+  
+  // Time analysis
+  totalInactiveMinutes    Float
+  analysisText            String
+  
+  // Tickets as JSON
+  todayTickets            String   @default("")
+  lastDayTickets          String   @default("")
+  
+  createdAt               DateTime @default(now())
+  
+  qaMetrics               QAMetrics @relation(fields: [qaMetricsId], references: [id], onDelete: Cascade)
+  
+  @@index([qaMetricsId])
+  @@index([qaAssignee])
+}
+
+model QAWIPTicket {
+  id                  String   @id @default(cuid())
+  qaMetricsId         String
+  ticketKey           String
+  initialQaDate       String
+  latestQaDate        String
+  qaRepetitionCount   Int
+  assignee            String
+  developer           String
+  storyPoints         Int?
+  qaStatus            String
+  priority            String
+  ageBd               Int
+  recentAgeBd         Int
+  summary             String
+  ticketType          String   // "critical" or "old"
+  
+  createdAt           DateTime @default(now())
+  
+  qaMetrics           QAMetrics @relation(fields: [qaMetricsId], references: [id], onDelete: Cascade)
+  
+  @@index([qaMetricsId])
+  @@index([ticketType])
+  @@index([ticketKey])
+}

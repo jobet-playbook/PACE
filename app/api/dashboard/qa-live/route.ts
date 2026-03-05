@@ -1,0 +1,162 @@
+import { NextResponse } from 'next/server'
+
+// This endpoint transforms the cached QA metrics into the dashboard format
+export async function GET() {
+  try {
+    // Fetch from the cache endpoint
+    const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
+    const response = await fetch(`${baseUrl}/api/qa-metrics`, {
+      cache: 'no-store',
+    })
+
+    if (!response.ok) {
+      // Return empty/default data if no cache available
+      return NextResponse.json({
+        metrics: {
+          spThroughputLast7: 0,
+          spThroughputLast7Delta: 0,
+          spThroughputLast28: 0,
+          spThroughputLast28Delta: 0,
+          paceLast7: 0,
+          paceLast28: 0,
+          assignedVolumeTotalTickets: 0,
+          assignedVolumeTotalSP: 0,
+          assignedVolumeAgingOver7: 0,
+          qCycleLast7: 0,
+          qCycleLast28: 0,
+          tCycleLast7: 0,
+          tCycleLast28: 0,
+          rAgeCycleLast7: 0,
+          rAgeCycleLast28: 0,
+          escapedDefects: 0,
+          critBugsOpen: 0,
+          critBugsResolved: 0,
+        },
+        criticalTickets: [],
+        agingTickets: [],
+        dailyPerformance: {
+          today: { tickets: 0, sp: 0, firstPass: 0, repeatPass: 0 },
+          yesterday: { tickets: 0, sp: 0, firstPass: 0, repeatPass: 0 },
+        },
+        teamMembers: [],
+        allMembers: [],
+        allStatuses: ['QA', 'In Progress', 'Done', 'Push Staging'],
+        aiInsights: [],
+        escapedBugs: [],
+        message: 'No live data available yet. Waiting for n8n workflow.',
+      })
+    }
+
+    const { data } = await response.json()
+    const { output, critical_qa_wip_tickets, old_qa_wip_tickets } = data
+
+    // Transform to dashboard format
+    const dashboardData = {
+      metrics: {
+        spThroughputLast7: output.today_overview.total_story_points,
+        spThroughputLast7Delta: 0,
+        spThroughputLast28: 0,
+        spThroughputLast28Delta: 0,
+        paceLast7: output.today_overview.repeat_percentage,
+        paceLast28: 0,
+        assignedVolumeTotalTickets: critical_qa_wip_tickets?.length + old_qa_wip_tickets?.length || 0,
+        assignedVolumeTotalSP: 0,
+        assignedVolumeAgingOver7: old_qa_wip_tickets?.length || 0,
+        qCycleLast7: 0,
+        qCycleLast28: 0,
+        tCycleLast7: 0,
+        tCycleLast28: 0,
+        rAgeCycleLast7: 0,
+        rAgeCycleLast28: 0,
+        escapedDefects: 0,
+        critBugsOpen: critical_qa_wip_tickets?.length || 0,
+        critBugsResolved: 0,
+      },
+      criticalTickets: critical_qa_wip_tickets?.map((ticket: any) => ({
+        key: ticket.ticket_key,
+        recentAge: ticket.recent_age_bd,
+        age: ticket.age_bd,
+        sp: ticket.story_points,
+        assignee: ticket.assignee,
+        developer: ticket.developer,
+        returnCount: ticket.qa_repetition_count,
+        firstQA: ticket.initial_qa_date,
+        latestQA: ticket.latest_qa_date,
+        status: ticket.qa_status,
+        summary: ticket.summary,
+      })) || [],
+      agingTickets: old_qa_wip_tickets?.map((ticket: any) => ({
+        key: ticket.ticket_key,
+        recentAge: ticket.recent_age_bd,
+        age: ticket.age_bd,
+        sp: ticket.story_points,
+        assignee: ticket.assignee,
+        developer: ticket.developer,
+        returnCount: ticket.qa_repetition_count,
+        firstQA: ticket.initial_qa_date,
+        latestQA: ticket.latest_qa_date,
+        status: ticket.qa_status,
+        summary: ticket.summary,
+      })) || [],
+      dailyPerformance: {
+        today: {
+          tickets: output.today_overview.total_tickets,
+          sp: output.today_overview.total_story_points,
+          firstPass: output.today_overview.first_time.ticket_count,
+          repeatPass: output.today_overview.repeat_pass.ticket_count,
+        },
+        yesterday: {
+          tickets: output.last_business_day_overview.total_tickets,
+          sp: output.last_business_day_overview.total_story_points,
+          firstPass: output.last_business_day_overview.first_time.ticket_count,
+          repeatPass: output.last_business_day_overview.repeat_pass.ticket_count,
+        },
+      },
+      teamMembers: output.people?.map((person: any) => ({
+        name: person.personName,
+        todayTickets: person.today_stats.ticket_count,
+        todaySP: person.today_stats.story_points,
+        todayFirstPass: person.today_stats.first_time_count,
+        todayFirstPassSP: 0,
+        todayRepeatPass: person.today_stats.repeat_count,
+        todayRepeatPassSP: 0,
+        todayChurn: person.today_stats.repeat_percentage,
+        weeklyTickets: 0,
+        weeklySP: 0,
+        weeklyFirstPass: 0,
+        weeklyRepeatPass: 0,
+        weeklyAvgCycleTime: 0,
+        monthlyTickets: 0,
+        monthlySP: 0,
+        monthlyFirstPass: 0,
+        monthlyRepeatPass: 0,
+        monthlyAvgCycleTime: 0,
+        dailyRhythm: person.activitySummary.summaryText,
+        activities: person.today_tickets?.map((ticket: any) => ({
+          ticketKey: ticket.ticket_id,
+          sp: ticket.story_points,
+          type: ticket.pass_type === 'first_time_pass' ? 'First Pass' : 'Repeat Pass',
+          time: ticket.completed_time_et,
+          description: ticket.recap,
+        })) || [],
+      })) || [],
+      allMembers: output.people?.map((p: any) => p.personName) || [],
+      allStatuses: ['QA', 'In Progress', 'Done', 'Push Staging'],
+      aiInsights: [],
+      escapedBugs: [],
+      reportMeta: output.report_meta,
+      reportDate: output.date,
+    }
+
+    return NextResponse.json(dashboardData)
+  } catch (error) {
+    console.error('Error transforming QA metrics:', error)
+    return NextResponse.json(
+      { 
+        error: 'Failed to retrieve live QA data',
+        details: error instanceof Error ? error.message : 'Unknown error'
+      },
+      { status: 500 }
+    )
+  }
+}
