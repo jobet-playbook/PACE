@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { setQAMetricsCache, getQAMetricsCache, getCacheTimestamp } from '@/lib/qa-cache'
+import { supabase } from '@/lib/supabase'
 
 export async function POST(request: NextRequest) {
   try {
@@ -10,7 +10,6 @@ export async function POST(request: NextRequest) {
     const payload = await request.json()
     console.log('📦 [QA Metrics] Received payload type:', Array.isArray(payload) ? 'Array' : typeof payload)
     console.log('📦 [QA Metrics] Payload keys:', typeof payload === 'object' ? Object.keys(payload) : 'N/A')
-    console.log('📦 [QA Metrics] Full payload:', JSON.stringify(payload, null, 2))
 
     let metricsData, googleDocFile
 
@@ -44,7 +43,7 @@ export async function POST(request: NextRequest) {
     console.log('📄 [QA Metrics] Google Doc file:', googleDocFile?.name || 'Not provided')
 
     // Extract the main report data
-    const { output, last_30_business_days, critical_qa_wip_tickets, old_qa_wip_tickets } = metricsData
+    const { output, last_30_business_days, rollback_windows, critical_wip_tickets, old_qa_wip_tickets, docs_id } = metricsData
 
     if (!output) {
       console.error('❌ [QA Metrics] Missing output data in payload')
@@ -58,31 +57,43 @@ export async function POST(request: NextRequest) {
     console.log('📅 [QA Metrics] Report date:', output.date)
     console.log('📋 [QA Metrics] Report type:', output.report_meta?.report_type)
     console.log('👥 [QA Metrics] People count:', output.people?.length || 0)
-    console.log('🔴 [QA Metrics] Critical tickets:', critical_qa_wip_tickets?.length || 0)
+    console.log('🔴 [QA Metrics] Critical tickets:', critical_wip_tickets?.length || 0)
     console.log('⏰ [QA Metrics] Old tickets:', old_qa_wip_tickets?.length || 0)
 
-    // Store in cache
-    const cacheData = {
-      output,
-      last_30_business_days,
-      critical_qa_wip_tickets,
-      old_qa_wip_tickets,
-      googleDocFile,
-      receivedAt: new Date().toISOString(),
-    }
-    setQAMetricsCache(cacheData)
+    // Save to Supabase
+    const { data: insertedData, error: insertError } = await supabase
+      .from('pace_qa_metrics')
+      .insert({
+        output,
+        last_30_business_days,
+        rollback_windows,
+        critical_wip_tickets,
+        old_qa_wip_tickets,
+        docs_id,
+      })
+      .select()
+      .single()
 
-    console.log('💾 [QA Metrics] Data cached successfully at:', cacheData.receivedAt)
+    if (insertError) {
+      console.error('❌ [QA Metrics] Supabase insert error:', insertError)
+      return NextResponse.json(
+        { error: 'Failed to save metrics to database', details: insertError.message },
+        { status: 500 }
+      )
+    }
+
+    console.log('💾 [QA Metrics] Data saved to Supabase successfully, ID:', insertedData.id)
 
     return NextResponse.json({
       success: true,
-      message: 'QA metrics data cached successfully',
+      message: 'QA metrics data saved successfully',
       reportDate: output.date,
       reportType: output.report_meta.report_type,
       assigneeCount: output.people?.length || 0,
-      criticalTicketsCount: critical_qa_wip_tickets?.length || 0,
+      criticalTicketsCount: critical_wip_tickets?.length || 0,
       oldTicketsCount: old_qa_wip_tickets?.length || 0,
-      cachedAt: cacheData.receivedAt,
+      savedAt: insertedData.created_at,
+      id: insertedData.id,
     })
   } catch (error) {
     console.error('❌ [QA Metrics] Error processing QA metrics:', error)
@@ -97,14 +108,21 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET endpoint to retrieve cached QA metrics
+// GET endpoint to retrieve latest QA metrics from Supabase
 export async function GET(request: NextRequest) {
   try {
     console.log('📤 [QA Metrics] GET request received at:', new Date().toISOString())
     
-    const cachedData = getQAMetricsCache()
-    if (!cachedData) {
-      console.log('⚠️ [QA Metrics] No cached data available')
+    // Fetch the most recent record from Supabase
+    const { data, error } = await supabase
+      .from('pace_qa_metrics')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single()
+
+    if (error || !data) {
+      console.log('⚠️ [QA Metrics] No data available in database')
       return NextResponse.json(
         { 
           error: 'No QA metrics data available',
@@ -114,22 +132,30 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Calculate cache age
-    const timestamp = getCacheTimestamp()
-    const cacheAgeMinutes = Math.floor((Date.now() - timestamp) / 1000 / 60)
-    const cacheAgeHours = Math.floor(cacheAgeMinutes / 60)
+    // Calculate data age
+    const createdAt = new Date(data.created_at)
+    const ageMinutes = Math.floor((Date.now() - createdAt.getTime()) / 1000 / 60)
+    const ageHours = Math.floor(ageMinutes / 60)
 
-    console.log('✅ [QA Metrics] Returning cached data')
-    console.log('⏱️ [QA Metrics] Cache age:', cacheAgeMinutes, 'minutes')
-    console.log('📅 [QA Metrics] Cached at:', cachedData.receivedAt)
+    console.log('✅ [QA Metrics] Returning data from Supabase')
+    console.log('⏱️ [QA Metrics] Data age:', ageMinutes, 'minutes')
+    console.log('📅 [QA Metrics] Created at:', data.created_at)
 
     return NextResponse.json({
       success: true,
-      data: cachedData,
+      data: {
+        output: data.output,
+        last_30_business_days: data.last_30_business_days,
+        rollback_windows: data.rollback_windows,
+        critical_wip_tickets: data.critical_wip_tickets,
+        old_qa_wip_tickets: data.old_qa_wip_tickets,
+        docs_id: data.docs_id,
+        receivedAt: data.created_at,
+      },
       cacheInfo: {
-        cachedAt: cachedData.receivedAt,
-        ageMinutes: cacheAgeMinutes,
-        ageHours: cacheAgeHours,
+        cachedAt: data.created_at,
+        ageMinutes: ageMinutes,
+        ageHours: ageHours,
       },
     })
   } catch (error) {

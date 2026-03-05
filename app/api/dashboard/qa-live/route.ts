@@ -1,13 +1,27 @@
 import { NextResponse } from 'next/server'
-import { getQAMetricsCache } from '@/lib/qa-cache'
+import { supabase } from '@/lib/supabase'
 
-// This endpoint transforms the cached QA metrics into the dashboard format
+// This endpoint transforms the QA metrics from Supabase into the dashboard format
 export async function GET() {
   try {
-    const cachedData = getQAMetricsCache()
+    console.log('🔍 [QA Live] Fetching data from Supabase...')
+    console.log('🔍 [QA Live] Supabase URL:', process.env.NEXT_PUBLIC_SUPABASE_URL)
     
-    // Check if we have cached data
-    if (!cachedData) {
+    // Fetch the most recent record from Supabase
+    const { data: dbData, error } = await supabase
+      .from('pace_qa_metrics')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single()
+    
+    console.log('🔍 [QA Live] Supabase response - Error:', error)
+    console.log('🔍 [QA Live] Supabase response - Data:', dbData ? 'Data found' : 'No data')
+    
+    // Check if we have data
+    if (error || !dbData) {
+      console.log('⚠️ [QA Live] No data in database or error occurred')
+      if (error) console.error('❌ [QA Live] Supabase error details:', error)
       // Return empty/default data if no cache available
       return NextResponse.json({
         metrics: {
@@ -23,8 +37,9 @@ export async function GET() {
         criticalTickets: [],
         agingTickets: [],
         dailyPerformance: {
-          today: { tickets: 0, sp: 0, firstPass: 0, repeatPass: 0 },
-          yesterday: { tickets: 0, sp: 0, firstPass: 0, repeatPass: 0 },
+          today: { date: '', tickets: 0, sp: 0, firstPass: 0, firstPassSP: 0, repeatPass: 0, repeatPassSP: 0 },
+          previous: { date: '', tickets: 0, sp: 0, firstPass: 0, firstPassSP: 0, repeatPass: 0, repeatPassSP: 0 },
+          last30BD: { tickets: 0, sp: 0, firstPass: 0, repeatPass: 0, repeatPassSP: 0 },
         },
         teamMembers: [],
         allMembers: [],
@@ -35,8 +50,8 @@ export async function GET() {
       })
     }
 
-    // Extract data from cache
-    const { output, critical_qa_wip_tickets, old_qa_wip_tickets } = cachedData
+    // Extract data from database
+    const { output, critical_wip_tickets, old_qa_wip_tickets } = dbData
 
     // Transform to dashboard format
     const dashboardData = {
@@ -54,7 +69,7 @@ export async function GET() {
           last28: 0,
         },
         assignedVolume: {
-          totalTickets: (critical_qa_wip_tickets?.length || 0) + (old_qa_wip_tickets?.length || 0),
+          totalTickets: (critical_wip_tickets?.length || 0) + (old_qa_wip_tickets?.length || 0),
           totalSP: 0,
           agingOver7: old_qa_wip_tickets?.length || 0,
         },
@@ -72,11 +87,11 @@ export async function GET() {
         },
         escapedDefects: 0,
         critBugs: {
-          open: critical_qa_wip_tickets?.length || 0,
+          open: critical_wip_tickets?.length || 0,
           resolved: 0,
         },
       },
-      criticalTickets: critical_qa_wip_tickets?.map((ticket: any) => ({
+      criticalTickets: critical_wip_tickets?.map((ticket: any) => ({
         key: ticket.ticket_key,
         recentAge: ticket.recent_age_bd,
         age: ticket.age_bd,
@@ -104,16 +119,29 @@ export async function GET() {
       })) || [],
       dailyPerformance: {
         today: {
+          date: output.report_meta.today_label,
           tickets: output.today_overview.total_tickets,
           sp: output.today_overview.total_story_points,
           firstPass: output.today_overview.first_time.ticket_count,
+          firstPassSP: output.today_overview.first_time.story_points,
           repeatPass: output.today_overview.repeat_pass.ticket_count,
+          repeatPassSP: output.today_overview.repeat_pass.story_points,
         },
-        yesterday: {
+        previous: {
+          date: output.report_meta.last_business_day_label,
           tickets: output.last_business_day_overview.total_tickets,
           sp: output.last_business_day_overview.total_story_points,
           firstPass: output.last_business_day_overview.first_time.ticket_count,
+          firstPassSP: output.last_business_day_overview.first_time.story_points,
           repeatPass: output.last_business_day_overview.repeat_pass.ticket_count,
+          repeatPassSP: output.last_business_day_overview.repeat_pass.story_points,
+        },
+        last30BD: {
+          tickets: 0,
+          sp: 0,
+          firstPass: 0,
+          repeatPass: 0,
+          repeatPassSP: 0,
         },
       },
       teamMembers: output.people?.map((person: any) => ({

@@ -25,6 +25,7 @@ import { SupportDashboard } from "@/components/support-dashboard"
 import { ClientKnowledgeDashboard } from "@/components/client-knowledge-dashboard"
 import { ShieldCheck, FileText, GitPullRequest, Layers, Database, Server, Headphones, BookOpen } from "lucide-react"
 import { useEffect, useState } from "react"
+import { supabase } from "@/lib/supabase"
 
 export default function DashboardPage() {
   const [qaData, setQaData] = useState<any>(null)
@@ -33,15 +34,176 @@ export default function DashboardPage() {
   useEffect(() => {
     async function fetchQAData() {
       try {
-        const response = await fetch('/api/dashboard/qa-live')
-        if (response.ok) {
-          const data = await response.json()
-          console.log('QA Data received:', data)
-          console.log('Metrics structure:', data.metrics)
-          setQaData(data)
-        } else {
-          console.error('Failed to fetch QA data:', response.status, response.statusText)
+        console.log('🔍 Fetching QA data from Supabase...')
+        
+        // Fetch the most recent record from Supabase
+        const { data: dbData, error } = await supabase
+          .from('pace_qa_metrics')
+          .select('*')
+          .order('created_at', { ascending: false })
+          .limit(1)
+
+        if (error) {
+          console.error('❌ Supabase error:', error)
+          setQaLoading(false)
+          return
         }
+
+        if (!dbData || dbData.length === 0) {
+          console.log('⚠️ No data in Supabase table')
+          setQaLoading(false)
+          return
+        }
+
+        const latestRecord = dbData[0]
+        console.log('✅ Data fetched from Supabase:', latestRecord)
+
+        // Transform the data for the dashboard
+        const { output, critical_wip_tickets, old_qa_wip_tickets } = latestRecord
+
+        const { rollback_windows } = latestRecord
+        
+        const transformedData = {
+          metrics: {
+            spThroughput: {
+              last7: rollback_windows?.w7?.throughput?.total_story_points || output.today_overview.total_story_points,
+              last7Delta: 0,
+              last28: rollback_windows?.w28?.throughput?.total_story_points || 0,
+              last28Delta: 0,
+              prior7: output.last_business_day_overview.total_story_points,
+              prior28: rollback_windows?.prior_w28?.throughput?.total_story_points || 0,
+            },
+            pace: {
+              last7: output.today_overview.repeat_percentage,
+              last28: 0,
+            },
+            assignedVolume: {
+              totalTickets: rollback_windows?.w7?.qa_in_progress?.total_tickets || (critical_wip_tickets?.length || 0) + (old_qa_wip_tickets?.length || 0),
+              totalSP: rollback_windows?.w7?.qa_in_progress?.total_story_points || 0,
+              agingOver7: rollback_windows?.w7?.qa_in_progress?.old_qa_wip_tickets?.length || old_qa_wip_tickets?.length || 0,
+            },
+            qCycle: { 
+              last7: rollback_windows?.w7?.cycle_time?.to_qa_avg_bd || 0, 
+              last28: rollback_windows?.w28?.cycle_time?.to_qa_avg_bd || 0 
+            },
+            tCycle: { 
+              last7: rollback_windows?.w7?.cycle_time?.to_done_avg_bd || 0, 
+              last28: rollback_windows?.w28?.cycle_time?.to_done_avg_bd || 0 
+            },
+            rAgeCycle: { 
+              last7: rollback_windows?.w7?.cycle_time?.to_pushback_avg_bd || 0, 
+              last28: rollback_windows?.w28?.cycle_time?.to_pushback_avg_bd || 0 
+            },
+            escapedDefects: rollback_windows?.w28?.defects?.escaped_defects_count || 0,
+            critBugs: {
+              open: rollback_windows?.w28?.defects?.critical_defects?.unresolved_count || critical_wip_tickets?.length || 0,
+              resolved: rollback_windows?.w28?.defects?.critical_defects?.resolved_count || 0,
+            },
+          },
+          criticalTickets: critical_wip_tickets?.map((ticket: any) => ({
+            key: ticket.ticket_key,
+            recentAge: ticket.recent_age_bd,
+            age: ticket.age_bd,
+            sp: ticket.story_points,
+            assignee: ticket.assignee,
+            developer: ticket.developer,
+            returnCount: ticket.qa_repetition_count,
+            firstQA: ticket.initial_qa_date,
+            latestQA: ticket.latest_qa_date,
+            status: ticket.qa_status,
+            summary: ticket.summary,
+          })) || [],
+          agingTickets: old_qa_wip_tickets?.map((ticket: any) => ({
+            key: ticket.ticket_key,
+            recentAge: ticket.recent_age_bd,
+            age: ticket.age_bd,
+            sp: ticket.story_points,
+            assignee: ticket.assignee,
+            developer: ticket.developer,
+            returnCount: ticket.qa_repetition_count,
+            firstQA: ticket.initial_qa_date,
+            latestQA: ticket.latest_qa_date,
+            status: ticket.qa_status,
+            summary: ticket.summary,
+          })) || [],
+          dailyPerformance: {
+            today: {
+              date: output.report_meta.today_label,
+              tickets: output.today_overview.total_tickets,
+              sp: output.today_overview.total_story_points,
+              firstPass: output.today_overview.first_time.ticket_count,
+              firstPassSP: output.today_overview.first_time.story_points,
+              repeatPass: output.today_overview.repeat_pass.ticket_count,
+              repeatPassSP: output.today_overview.repeat_pass.story_points,
+            },
+            previous: {
+              date: output.report_meta.last_business_day_label,
+              tickets: output.last_business_day_overview.total_tickets,
+              sp: output.last_business_day_overview.total_story_points,
+              firstPass: output.last_business_day_overview.first_time.ticket_count,
+              firstPassSP: output.last_business_day_overview.first_time.story_points,
+              repeatPass: output.last_business_day_overview.repeat_pass.ticket_count,
+              repeatPassSP: output.last_business_day_overview.repeat_pass.story_points,
+            },
+            last30BD: {
+              tickets: 0,
+              sp: 0,
+              firstPass: 0,
+              repeatPass: 0,
+              repeatPassSP: 0,
+            },
+          },
+          teamMembers: output.people?.map((person: any) => ({
+            name: person.personName,
+            today: {
+              tickets: person.today_stats.ticket_count,
+              sp: person.today_stats.story_points,
+              firstPass: person.today_stats.first_time_count,
+              firstPassSP: 0,
+              repeatPass: person.today_stats.repeat_count,
+              repeatPassSP: 0,
+              churn: person.today_stats.repeat_percentage,
+            },
+            previousDay: {
+              tickets: 0,
+              sp: 0,
+              firstPass: 0,
+              firstPassSP: 0,
+              repeatPass: 0,
+              repeatPassSP: 0,
+              churn: 0,
+            },
+            weekly: {
+              tickets: 0,
+              sp: 0,
+              firstPass: 0,
+              repeatPass: 0,
+              avgCycleTime: 0,
+            },
+            monthly: {
+              tickets: 0,
+              sp: 0,
+              firstPass: 0,
+              repeatPass: 0,
+              avgCycleTime: 0,
+            },
+            dailyRhythm: person.activitySummary.summaryText,
+            activities: person.today_tickets?.map((ticket: any) => ({
+              ticketKey: ticket.ticket_id,
+              sp: ticket.story_points || 0,
+              type: ticket.pass_type === 'first_time_pass' ? 'First Pass' : 'Repeat Pass',
+              time: ticket.completed_time_et,
+              description: ticket.recap,
+            })) || [],
+          })) || [],
+          allMembers: output.people?.map((p: any) => p.personName) || [],
+          allStatuses: ['QA', 'In Progress', 'Done', 'Push Staging'],
+          aiInsights: [],
+          escapedBugs: [],
+        }
+
+        console.log('📊 Transformed data:', transformedData)
+        setQaData(transformedData)
       } catch (error) {
         console.error('Failed to fetch QA data:', error)
       } finally {
