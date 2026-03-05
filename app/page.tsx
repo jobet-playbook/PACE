@@ -36,7 +36,11 @@ export default function DashboardPage() {
         const response = await fetch('/api/dashboard/qa-live')
         if (response.ok) {
           const data = await response.json()
+          console.log('QA Data received:', data)
+          console.log('Metrics structure:', data.metrics)
           setQaData(data)
+        } else {
+          console.error('Failed to fetch QA data:', response.status, response.statusText)
         }
       } catch (error) {
         console.error('Failed to fetch QA data:', error)
