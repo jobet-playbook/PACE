@@ -373,11 +373,24 @@ export function calculateThroughput(doneTickets: TicketWithQAData[]): Throughput
       throughput.ticket_story_points += sp
       throughput.unique_ticket_story_points += !isDuplicate ? sp : 0
 
+      // Find the history entry for when this ticket left QA
+      const qaExitHistory = ticket.changelog?.histories?.find((h: any) => 
+        h.items.some((item: any) => 
+          item.field === 'status' && 
+          item.fromString === qa_assignee.status &&
+          item.toString !== 'In Progress' &&
+          item.toString !== 'Open'
+        )
+      )
+
       throughput.tickets.push({
         ticket_key: ticket.key,
         story_points: sp,
         history_id: qa_assignee.historyId,
-        handled_stage: qa_assignee.status
+        handled_stage: qa_assignee.status,
+        history_created: qaExitHistory?.created || ticket.fields.statuscategorychangedate,
+        had_previous_returns: ticket.qa_repetition_count > 0,
+        qa_return_cycles_count: ticket.qa_repetition_count
       })
     }
   }
@@ -572,9 +585,10 @@ export class JiraWorkflowProcessor {
 
     // Fetch tickets
     const [doneTickets, wipTickets, defectTickets, pushbackTickets] = await Promise.all([
-      // Done tickets - tickets that moved FROM QA status TO Done
+      // Done tickets - tickets that changed FROM QA status during the time window
+      // This captures tickets moving to Push Staging, Push Production, or Done
       this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED FROM (${COUNTED_STATUS.map(s => `"${s}"`).join(', ')}) TO ("Done") AFTER startOfDay(${-(window.days + window.prior_days)}) BEFORE endOfDay(${-window.prior_days}) ORDER BY updated DESC`,
+        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED FROM (${COUNTED_STATUS.map(s => `"${s}"`).join(', ')}) DURING (startOfDay(${-(window.days + window.prior_days)}), endOfDay(${-window.prior_days})) AND status NOT IN ("In Progress", "Open", ${COUNTED_STATUS.map(s => `"${s}"`).join(', ')}) ORDER BY updated DESC`,
         ['changelog']
       ),
       

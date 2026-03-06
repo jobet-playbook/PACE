@@ -128,73 +128,109 @@ export default function DashboardPage() {
           dailyPerformance: {
             today: {
               date: output?.report_meta?.today_label || new Date().toLocaleDateString(),
-              tickets: output?.today_overview?.total_tickets || 0,
-              sp: output?.today_overview?.total_story_points || 0,
-              firstPass: output?.today_overview?.first_time?.ticket_count || 0,
-              firstPassSP: output?.today_overview?.first_time?.story_points || 0,
-              repeatPass: output?.today_overview?.repeat_pass?.ticket_count || 0,
-              repeatPassSP: output?.today_overview?.repeat_pass?.story_points || 0,
+              tickets: output?.people?.reduce((sum: number, p: any) => sum + (p.today_stats?.ticket_count || 0), 0) || 0,
+              sp: output?.people?.reduce((sum: number, p: any) => sum + (p.today_stats?.story_points || 0), 0) || 0,
+              firstPass: output?.people?.reduce((sum: number, p: any) => sum + (p.today_stats?.first_time_count || 0), 0) || 0,
+              firstPassSP: output?.people?.reduce((sum: number, p: any) => {
+                const fpTickets = p.today_tickets?.filter((t: any) => t.pass_type === 'first_time_pass') || []
+                return sum + fpTickets.reduce((s: number, t: any) => s + (t.story_points || 0), 0)
+              }, 0) || 0,
+              repeatPass: output?.people?.reduce((sum: number, p: any) => sum + (p.today_stats?.repeat_count || 0), 0) || 0,
+              repeatPassSP: output?.people?.reduce((sum: number, p: any) => {
+                const rpTickets = p.today_tickets?.filter((t: any) => t.pass_type === 'repeat_pass') || []
+                return sum + rpTickets.reduce((s: number, t: any) => s + (t.story_points || 0), 0)
+              }, 0) || 0,
             },
             previous: {
               date: output?.report_meta?.last_business_day_label || '',
-              tickets: output?.last_business_day_overview?.total_tickets || 0,
-              sp: output?.last_business_day_overview?.total_story_points || 0,
-              firstPass: output?.last_business_day_overview?.first_time?.ticket_count || 0,
-              firstPassSP: output?.last_business_day_overview?.first_time?.story_points || 0,
-              repeatPass: output?.last_business_day_overview?.repeat_pass?.ticket_count || 0,
-              repeatPassSP: output?.last_business_day_overview?.repeat_pass?.story_points || 0,
+              tickets: output?.people?.reduce((sum: number, p: any) => sum + (p.last_business_day_stats?.ticket_count || 0), 0) || 0,
+              sp: output?.people?.reduce((sum: number, p: any) => sum + (p.last_business_day_stats?.story_points || 0), 0) || 0,
+              firstPass: output?.people?.reduce((sum: number, p: any) => sum + (p.last_business_day_stats?.first_time_count || 0), 0) || 0,
+              firstPassSP: output?.people?.reduce((sum: number, p: any) => {
+                const fpTickets = p.last_business_day_tickets?.filter((t: any) => t.pass_type === 'first_time_pass') || []
+                return sum + fpTickets.reduce((s: number, t: any) => s + (t.story_points || 0), 0)
+              }, 0) || 0,
+              repeatPass: output?.people?.reduce((sum: number, p: any) => sum + (p.last_business_day_stats?.repeat_count || 0), 0) || 0,
+              repeatPassSP: output?.people?.reduce((sum: number, p: any) => {
+                const rpTickets = p.last_business_day_tickets?.filter((t: any) => t.pass_type === 'repeat_pass') || []
+                return sum + rpTickets.reduce((s: number, t: any) => s + (t.story_points || 0), 0)
+              }, 0) || 0,
             },
             last30BD: {
-              tickets: 0,
-              sp: 0,
-              firstPass: 0,
-              repeatPass: 0,
-              repeatPassSP: 0,
+              tickets: latestRecord.last_30_business_days?.total_tickets || 0,
+              sp: latestRecord.last_30_business_days?.story_points || 0,
+              firstPass: latestRecord.last_30_business_days?.first_qa_cycle?.ticket_count || 0,
+              repeatPass: latestRecord.last_30_business_days?.returning_qa_cycle?.ticket_count || 0,
+              repeatPassSP: latestRecord.last_30_business_days?.returning_qa_cycle?.story_points || 0,
             },
           },
-          teamMembers: output?.people?.map((person: any) => ({
-            name: person.qa_assignee,
-            today: {
-              tickets: person.today_stats.ticket_count,
-              sp: person.today_stats.story_points,
-              firstPass: person.today_stats.first_time_count,
-              firstPassSP: 0,
-              repeatPass: person.today_stats.repeat_count,
-              repeatPassSP: 0,
-              churn: person.today_stats.repeat_percentage,
-            },
-            previousDay: {
-              tickets: person.last_business_day_stats?.ticket_count || 0,
-              sp: person.last_business_day_stats?.story_points || 0,
-              firstPass: person.last_business_day_stats?.first_time_count || 0,
-              firstPassSP: 0,
-              repeatPass: person.last_business_day_stats?.repeat_count || 0,
-              repeatPassSP: 0,
-              churn: person.last_business_day_stats?.repeat_percentage || 0,
-            },
-            weekly: {
-              tickets: person.wip_count || 0,
-              sp: person.wip_story_points || 0,
-              firstPass: 0,
-              repeatPass: 0,
-              avgCycleTime: 0,
-            },
-            monthly: {
-              tickets: 0,
-              sp: 0,
-              firstPass: 0,
-              repeatPass: 0,
-              avgCycleTime: 0,
-            },
-            dailyRhythm: `Completed ${person.today_stats.ticket_count} tickets`,
-            activities: person.today_tickets?.map((ticket: any) => ({
-              ticketKey: ticket.ticket_id,
-              sp: ticket.story_points || 0,
-              type: ticket.pass_type === 'first_time_pass' ? 'First Pass' : 'Repeat Pass',
-              time: ticket.completed_time_et,
-              description: ticket.recap,
-            })) || [],
-          })) || [],
+          teamMembers: output?.people?.map((person: any) => {
+            // Calculate SP breakdown for today
+            const todayFirstPassTickets = person.today_tickets?.filter((t: any) => t.pass_type === 'first_time_pass') || []
+            const todayRepeatPassTickets = person.today_tickets?.filter((t: any) => t.pass_type === 'repeat_pass') || []
+            const todayFirstPassSP = todayFirstPassTickets.reduce((sum: number, t: any) => sum + (t.story_points || 0), 0)
+            const todayRepeatPassSP = todayRepeatPassTickets.reduce((sum: number, t: any) => sum + (t.story_points || 0), 0)
+            
+            // Calculate SP breakdown for previous day
+            const prevFirstPassTickets = person.last_business_day_tickets?.filter((t: any) => t.pass_type === 'first_time_pass') || []
+            const prevRepeatPassTickets = person.last_business_day_tickets?.filter((t: any) => t.pass_type === 'repeat_pass') || []
+            const prevFirstPassSP = prevFirstPassTickets.reduce((sum: number, t: any) => sum + (t.story_points || 0), 0)
+            const prevRepeatPassSP = prevRepeatPassTickets.reduce((sum: number, t: any) => sum + (t.story_points || 0), 0)
+            
+            // Find weekly data from w7 rollback window
+            const weeklyData = rollback_windows?.w7?.throughput?.per_qa_member_throughput?.find(
+              (m: any) => m.qa_name === person.qa_assignee
+            )
+            
+            // Find WIP data for this member
+            const wipData = rollback_windows?.w7?.qa_in_progress?.per_qa_member_qa_in_progress?.find(
+              (m: any) => m.qa_assignee === person.qa_assignee
+            )
+            
+            return {
+              name: person.qa_assignee,
+              today: {
+                tickets: person.today_stats.ticket_count,
+                sp: person.today_stats.story_points,
+                firstPass: person.today_stats.first_time_count,
+                firstPassSP: todayFirstPassSP,
+                repeatPass: person.today_stats.repeat_count,
+                repeatPassSP: todayRepeatPassSP,
+                churn: person.today_stats.repeat_percentage,
+              },
+              previousDay: {
+                tickets: person.last_business_day_stats?.ticket_count || 0,
+                sp: person.last_business_day_stats?.story_points || 0,
+                firstPass: person.last_business_day_stats?.first_time_count || 0,
+                firstPassSP: prevFirstPassSP,
+                repeatPass: person.last_business_day_stats?.repeat_count || 0,
+                repeatPassSP: prevRepeatPassSP,
+                churn: person.last_business_day_stats?.repeat_percentage || 0,
+              },
+              weekly: {
+                tickets: wipData?.qa_tickets_wip_count || weeklyData?.unique_ticket_count || 0,
+                sp: wipData?.qa_tickets_wip_story_points_total || weeklyData?.unique_ticket_story_points || 0,
+                firstPass: 0,
+                repeatPass: 0,
+                avgCycleTime: 0,
+              },
+              monthly: {
+                tickets: 0,
+                sp: 0,
+                firstPass: 0,
+                repeatPass: 0,
+                avgCycleTime: 0,
+              },
+              dailyRhythm: `Completed ${person.today_stats.ticket_count} tickets`,
+              activities: person.today_tickets?.map((ticket: any) => ({
+                ticketKey: ticket.ticket_id,
+                sp: ticket.story_points || 0,
+                type: ticket.pass_type === 'first_time_pass' ? 'First Pass' : 'Repeat Pass',
+                time: ticket.completed_time_et,
+                description: ticket.recap,
+              })) || [],
+            }
+          }) || [],
           allMembers: output?.people?.map((p: any) => p.qa_assignee) || [],
           allStatuses: ['QA', 'In Progress', 'Done', 'Push Staging'],
           aiInsights: [],

@@ -122,26 +122,54 @@ function buildPeopleData(windowData: any) {
   // Aggregate data by QA member
   for (const member of windowData.throughput.per_qa_member_throughput) {
     if (!qaMembers.has(member.qa_name)) {
+      // Calculate actual first pass vs repeat pass from tickets
+      const firstPassTickets = member.tickets.filter((t: any) => !t.had_previous_returns)
+      const repeatPassTickets = member.tickets.filter((t: any) => t.had_previous_returns)
+      const firstPassCount = firstPassTickets.length
+      const repeatPassCount = repeatPassTickets.length
+      const repeatPercentage = member.unique_ticket_count > 0 
+        ? Math.round((repeatPassCount / member.unique_ticket_count) * 100) 
+        : 0
+
       qaMembers.set(member.qa_name, {
         qa_assignee: member.qa_name,
         today_stats: {
           ticket_count: member.unique_ticket_count,
           story_points: member.unique_ticket_story_points,
-          first_time_count: Math.round(member.unique_ticket_count * 0.7), // Estimate
-          repeat_count: Math.round(member.unique_ticket_count * 0.3),
-          repeat_percentage: 30 // Estimate
+          first_time_count: firstPassCount,
+          repeat_count: repeatPassCount,
+          repeat_percentage: repeatPercentage
         },
-        today_tickets: member.tickets.map((ticket: any) => ({
-          ticket_id: ticket.ticket_key,
-          completed_time_et: '12:00 PM ET', // Placeholder
-          story_points: ticket.story_points,
-          handled_stage: ticket.handled_stage,
-          new_stage: 'Done',
-          pass_type: 'first_time_pass',
-          qa_return_cycles_count: 0,
-          had_previous_returns: false,
-          recap: `Completed ${ticket.ticket_key}`
-        })),
+        today_tickets: member.tickets.map((ticket: any) => {
+          // Extract completion time from history_created or use current time
+          const completionTime = ticket.history_created 
+            ? new Date(ticket.history_created).toLocaleTimeString('en-US', { 
+                timeZone: 'America/New_York',
+                hour: 'numeric',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true
+              }) + ' ET'
+            : new Date().toLocaleTimeString('en-US', { 
+                timeZone: 'America/New_York',
+                hour: 'numeric',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true
+              }) + ' ET'
+
+          return {
+            ticket_id: ticket.ticket_key,
+            completed_time_et: completionTime,
+            story_points: ticket.story_points,
+            handled_stage: ticket.handled_stage,
+            new_stage: 'Done',
+            pass_type: ticket.had_previous_returns ? 'repeat_pass' : 'first_time_pass',
+            qa_return_cycles_count: ticket.qa_return_cycles_count || 0,
+            had_previous_returns: ticket.had_previous_returns || false,
+            recap: `${ticket.ticket_key} completed QA (${ticket.story_points || 0} pt${ticket.story_points === 1 ? '' : 's'}, ${ticket.had_previous_returns ? 'repeat' : 'first-time'} pass) moving from ${ticket.handled_stage} to Done.`
+          }
+        }),
         last_business_day_stats: {
           ticket_count: 0,
           story_points: 0,
