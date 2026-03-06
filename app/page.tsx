@@ -30,33 +30,32 @@ import { supabase } from "@/lib/supabase"
 export default function DashboardPage() {
   const [qaData, setQaData] = useState<any>(null)
   const [qaLoading, setQaLoading] = useState(true)
+  const [testingData, setTestingData] = useState<any>(null)
 
   useEffect(() => {
     async function fetchQAData() {
       try {
-        console.log('🔍 Fetching QA data from Supabase...')
+        console.log('🔍 Fetching live QA data from Jira...')
         
-        // Fetch the most recent record from Supabase
-        const { data: dbData, error } = await supabase
-          .from('pace_qa_metrics')
-          .select('*')
-          .order('created_at', { ascending: false })
-          .limit(1)
-
-        if (error) {
-          console.error('❌ Supabase error:', error)
+        // Fetch live data from Jira API endpoint
+        const response = await fetch('/api/qa-metrics/live')
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}))
+          console.error('❌ Failed to fetch live data:', response.statusText, errorData)
+          
+          // Store error message for display
+          setQaData({ 
+            error: true, 
+            message: errorData.message || 'Failed to fetch live data from Jira',
+            instructions: errorData.instructions 
+          })
           setQaLoading(false)
           return
         }
 
-        if (!dbData || dbData.length === 0) {
-          console.log('⚠️ No data in Supabase table')
-          setQaLoading(false)
-          return
-        }
-
-        const latestRecord = dbData[0]
-        console.log('✅ Data fetched from Supabase:', latestRecord)
+        const latestRecord = await response.json()
+        console.log('✅ Live data fetched from Jira:', latestRecord)
 
         // Transform the data for the dashboard
         const { output, critical_wip_tickets, old_qa_wip_tickets } = latestRecord
@@ -66,15 +65,15 @@ export default function DashboardPage() {
         const transformedData = {
           metrics: {
             spThroughput: {
-              last7: rollback_windows?.w7?.throughput?.total_story_points || output.today_overview.total_story_points,
+              last7: rollback_windows?.w7?.throughput?.total_story_points || output?.today_overview?.total_story_points || 0,
               last7Delta: 0,
               last28: rollback_windows?.w28?.throughput?.total_story_points || 0,
               last28Delta: 0,
-              prior7: output.last_business_day_overview.total_story_points,
+              prior7: output?.last_business_day_overview?.total_story_points || 0,
               prior28: rollback_windows?.prior_w28?.throughput?.total_story_points || 0,
             },
             pace: {
-              last7: output.today_overview.repeat_percentage,
+              last7: output?.today_overview?.repeat_percentage || 0,
               last28: 0,
             },
             assignedVolume: {
@@ -128,22 +127,22 @@ export default function DashboardPage() {
           })) || [],
           dailyPerformance: {
             today: {
-              date: output.report_meta.today_label,
-              tickets: output.today_overview.total_tickets,
-              sp: output.today_overview.total_story_points,
-              firstPass: output.today_overview.first_time.ticket_count,
-              firstPassSP: output.today_overview.first_time.story_points,
-              repeatPass: output.today_overview.repeat_pass.ticket_count,
-              repeatPassSP: output.today_overview.repeat_pass.story_points,
+              date: output?.report_meta?.today_label || new Date().toLocaleDateString(),
+              tickets: output?.today_overview?.total_tickets || 0,
+              sp: output?.today_overview?.total_story_points || 0,
+              firstPass: output?.today_overview?.first_time?.ticket_count || 0,
+              firstPassSP: output?.today_overview?.first_time?.story_points || 0,
+              repeatPass: output?.today_overview?.repeat_pass?.ticket_count || 0,
+              repeatPassSP: output?.today_overview?.repeat_pass?.story_points || 0,
             },
             previous: {
-              date: output.report_meta.last_business_day_label,
-              tickets: output.last_business_day_overview.total_tickets,
-              sp: output.last_business_day_overview.total_story_points,
-              firstPass: output.last_business_day_overview.first_time.ticket_count,
-              firstPassSP: output.last_business_day_overview.first_time.story_points,
-              repeatPass: output.last_business_day_overview.repeat_pass.ticket_count,
-              repeatPassSP: output.last_business_day_overview.repeat_pass.story_points,
+              date: output?.report_meta?.last_business_day_label || '',
+              tickets: output?.last_business_day_overview?.total_tickets || 0,
+              sp: output?.last_business_day_overview?.total_story_points || 0,
+              firstPass: output?.last_business_day_overview?.first_time?.ticket_count || 0,
+              firstPassSP: output?.last_business_day_overview?.first_time?.story_points || 0,
+              repeatPass: output?.last_business_day_overview?.repeat_pass?.ticket_count || 0,
+              repeatPassSP: output?.last_business_day_overview?.repeat_pass?.story_points || 0,
             },
             last30BD: {
               tickets: 0,
@@ -153,8 +152,8 @@ export default function DashboardPage() {
               repeatPassSP: 0,
             },
           },
-          teamMembers: output.people?.map((person: any) => ({
-            name: person.personName,
+          teamMembers: output?.people?.map((person: any) => ({
+            name: person.qa_assignee,
             today: {
               tickets: person.today_stats.ticket_count,
               sp: person.today_stats.story_points,
@@ -165,17 +164,17 @@ export default function DashboardPage() {
               churn: person.today_stats.repeat_percentage,
             },
             previousDay: {
-              tickets: 0,
-              sp: 0,
-              firstPass: 0,
+              tickets: person.last_business_day_stats?.ticket_count || 0,
+              sp: person.last_business_day_stats?.story_points || 0,
+              firstPass: person.last_business_day_stats?.first_time_count || 0,
               firstPassSP: 0,
-              repeatPass: 0,
+              repeatPass: person.last_business_day_stats?.repeat_count || 0,
               repeatPassSP: 0,
-              churn: 0,
+              churn: person.last_business_day_stats?.repeat_percentage || 0,
             },
             weekly: {
-              tickets: 0,
-              sp: 0,
+              tickets: person.wip_count || 0,
+              sp: person.wip_story_points || 0,
               firstPass: 0,
               repeatPass: 0,
               avgCycleTime: 0,
@@ -187,7 +186,7 @@ export default function DashboardPage() {
               repeatPass: 0,
               avgCycleTime: 0,
             },
-            dailyRhythm: person.activitySummary.summaryText,
+            dailyRhythm: `Completed ${person.today_stats.ticket_count} tickets`,
             activities: person.today_tickets?.map((ticket: any) => ({
               ticketKey: ticket.ticket_id,
               sp: ticket.story_points || 0,
@@ -196,7 +195,7 @@ export default function DashboardPage() {
               description: ticket.recap,
             })) || [],
           })) || [],
-          allMembers: output.people?.map((p: any) => p.personName) || [],
+          allMembers: output?.people?.map((p: any) => p.qa_assignee) || [],
           allStatuses: ['QA', 'In Progress', 'Done', 'Push Staging'],
           aiInsights: [],
           escapedBugs: [],
@@ -204,6 +203,50 @@ export default function DashboardPage() {
 
         console.log('📊 Transformed data:', transformedData)
         setQaData(transformedData)
+
+        // Transform data for TRIPS Testing section using rollback window data
+        const w7Data = rollback_windows?.w7
+        const w28Data = rollback_windows?.w28
+        
+        const testingTeamData = w7Data?.throughput?.per_qa_member_throughput?.map((member: any) => {
+          // Get 7-day data
+          const sp7 = member.unique_ticket_story_points || 0
+          const tickets7 = member.unique_ticket_count || 0
+          
+          // Find 28-day data for the same member
+          const member28 = w28Data?.throughput?.per_qa_member_throughput?.find(
+            (m: any) => m.qa_name === member.qa_name
+          )
+          const sp28 = member28?.unique_ticket_story_points || 0
+          const tickets28 = member28?.unique_ticket_count || 0
+          
+          // Calculate daily pace from 7-day window
+          const dailyPace = sp7 / 7
+          
+          return {
+            name: member.qa_name,
+            pace: {
+              7: sp7,
+              14: sp7 * 2, // Estimate
+              30: sp28 || (sp7 * 4), // Use 28-day data or estimate
+            },
+            sp: {
+              7: sp7,
+              14: sp7 * 2,
+              30: sp28 || (sp7 * 4),
+            },
+            tickets: {
+              7: tickets7,
+              14: tickets7 * 2,
+              30: tickets28 || (tickets7 * 4),
+            },
+            avg60DailyPace: dailyPace,
+          }
+        }) || []
+
+        setTestingData(testingTeamData)
+        console.log('🧪 Testing team data:', testingTeamData)
+
       } catch (error) {
         console.error('Failed to fetch QA data:', error)
       } finally {
@@ -270,7 +313,7 @@ export default function DashboardPage() {
 
           {/* TRIPS Summary Tab */}
           <TabsContent value="trips">
-            <TripsSummary />
+            <TripsSummary testingMembers={testingData} />
           </TabsContent>
 
           {/* QA PACE Tab */}
@@ -302,8 +345,22 @@ export default function DashboardPage() {
               />
             ) : (
               <div className="flex flex-col items-center justify-center h-96 gap-4">
-                <p className="text-muted-foreground">No QA data available</p>
-                <p className="text-sm text-muted-foreground">{qaData?.message || 'Waiting for data from n8n workflow'}</p>
+                <p className="text-muted-foreground">
+                  {qaData?.error ? '⚠️ Jira Configuration Required' : 'No QA data available'}
+                </p>
+                <p className="text-sm text-muted-foreground max-w-md text-center">
+                  {qaData?.message || 'Waiting for data from Jira'}
+                </p>
+                {qaData?.instructions && (
+                  <div className="bg-muted p-4 rounded-md max-w-md">
+                    <p className="text-xs text-muted-foreground mb-2">To fix this:</p>
+                    <ol className="text-xs text-muted-foreground list-decimal list-inside space-y-1">
+                      <li>Get your Jira API token from: <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" className="text-primary underline">Atlassian API Tokens</a></li>
+                      <li>Add it to your <code className="bg-background px-1 rounded">.env.local</code> file</li>
+                      <li>Restart your dev server</li>
+                    </ol>
+                  </div>
+                )}
               </div>
             )}
           </TabsContent>

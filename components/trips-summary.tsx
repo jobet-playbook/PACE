@@ -80,11 +80,26 @@ function DeltaBadge({ delta }: { delta: number | null }) {
   )
 }
 
-export function TripsSummary() {
+interface TripsSummaryProps {
+  testingMembers?: TripsMemberPace[]
+}
+
+export function TripsSummary({ testingMembers }: TripsSummaryProps) {
   const [days, setDays] = useState<DayWindow>(7)
 
+  // Use live testing data if available, otherwise fall back to static data
+  const updatedTripsTeams = tripsTeams.map((team) => {
+    if (team.key === "T" && testingMembers && testingMembers.length > 0) {
+      return {
+        ...team,
+        members: testingMembers,
+      }
+    }
+    return team
+  })
+
   // Compute totals per letter
-  const letterTotals = tripsTeams.map((team) => {
+  const letterTotals = updatedTripsTeams.map((team) => {
     const totalPace = team.members.reduce((s, m) => s + m.pace[days], 0)
     const totalSP = team.members.reduce((s, m) => s + m.sp[days], 0)
     const totalTix = team.members.reduce((s, m) => s + m.tickets[days], 0)
@@ -125,7 +140,7 @@ export function TripsSummary() {
       {/* TRIPS Overview Row - compact totals */}
       <div className="grid grid-cols-5 gap-2">
         {letterTotals.map((lt) => {
-          const team = tripsTeams.find((t) => t.key === lt.key)!
+          const team = updatedTripsTeams.find((t) => t.key === lt.key)!
           const Icon = metricIcons[lt.key]
           return (
             <Card key={lt.key} className={cn("py-2 px-2.5 gap-0 border-l-3", metricBorderColors[lt.key])}>
@@ -159,7 +174,7 @@ export function TripsSummary() {
             <DeltaBadge
               delta={computeDelta(
                 tripsGrandTotal,
-                tripsTeams.reduce((s, t) => s + t.members.reduce((a, m) => a + m.avg60DailyPace, 0), 0),
+                updatedTripsTeams.reduce((s, t) => s + t.members.reduce((a, m) => a + m.avg60DailyPace, 0), 0),
                 days
               )}
             />
@@ -187,7 +202,7 @@ export function TripsSummary() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Left/Top: Pace Comparison Tables */}
         <div className="flex flex-col gap-2">
-          {tripsTeams.map((team) => (
+          {updatedTripsTeams.map((team) => (
             <LetterPaceTable key={team.key} team={team} days={days} />
           ))}
           {/* Dev Team Table */}
