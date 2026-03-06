@@ -259,6 +259,24 @@ CREATE INDEX idx_pace_qa_insights_report ON pace_qa_insights(report_id);
 CREATE INDEX idx_pace_qa_insights_type ON pace_qa_insights(insight_type);
 
 -- ============================================================
+-- 11. CACHE POOL TABLE
+-- ============================================================
+-- Persistent cache for Jira API responses to combat rate limiting
+CREATE TABLE pace_cache_pool (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  cache_key VARCHAR(255) NOT NULL UNIQUE,
+  data JSONB NOT NULL,
+  cached_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_cache_pool_key ON pace_cache_pool(cache_key);
+CREATE INDEX idx_pace_cache_pool_cached_at ON pace_cache_pool(cached_at DESC);
+
+COMMENT ON TABLE pace_cache_pool IS 'Persistent cache for API responses to reduce rate limiting';
+
+-- ============================================================
 -- VIEWS FOR COMMON QUERIES
 -- ============================================================
 

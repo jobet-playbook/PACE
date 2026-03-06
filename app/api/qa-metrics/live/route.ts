@@ -1,14 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createJiraClient } from '@/lib/jira-client'
 import { JiraWorkflowProcessor } from '@/lib/jira-workflow'
+import { cachePool, CacheKeys } from '@/lib/cache-pool'
 
 /**
  * API endpoint to fetch and process live QA metrics from Jira
- * Returns processed data ready for UI consumption
+ * Uses multi-layer cache pool to combat rate limiting and improve performance
  */
 export async function GET(request: NextRequest) {
+  const cacheKey = CacheKeys.LIVE_METRICS
+  
   try {
-    console.log('🔄 [QA Metrics Live] Fetching live data from Jira at:', new Date().toISOString())
+    console.log('🔄 [Live] Fetching QA metrics...')
+
+    // 1. Try to get from cache pool (memory + Supabase)
+    const cachedData = await cachePool.get(cacheKey)
+    if (cachedData) {
+      return NextResponse.json({
+        ...cachedData,
+        _cached: true,
+        _source: 'cache_pool'
+      })
+    }
+
+    console.log('📊 [Live] Cache miss, fetching from Jira...')
 
     // Check if Jira credentials are configured
     const jiraBaseUrl = process.env.JIRA_BASE_URL
@@ -98,14 +113,43 @@ export async function GET(request: NextRequest) {
       old_qa_wip_tickets
     }
 
-    return NextResponse.json(response)
+    // 2. Store in cache pool for future requests
+    await cachePool.set(cacheKey, response)
+    console.log('💾 [Live] Data cached successfully')
+
+    return NextResponse.json({
+      ...response,
+      _cached: false,
+      _source: 'jira_api'
+    })
 
   } catch (error) {
-    console.error('❌ [QA Metrics Live] Error fetching live data:', error)
+    console.error('❌ [Live] Error fetching live data:', error)
+    
+    // 3. On error, try to return stale cache (up to 24 hours old)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    const isRateLimitError = errorMessage.includes('429') || errorMessage.includes('rate limit')
+    
+    if (isRateLimitError) {
+      console.log('⚠️ [Live] Rate limit detected, attempting stale cache fallback...')
+      const staleData = await cachePool.getStale(cacheKey)
+      
+      if (staleData) {
+        return NextResponse.json({
+          ...staleData,
+          _cached: true,
+          _stale: true,
+          _rateLimited: true,
+          _source: 'stale_cache'
+        })
+      }
+    }
+    
     return NextResponse.json(
       { 
         error: 'Failed to fetch live QA metrics from Jira',
-        details: error instanceof Error ? error.message : 'Unknown error'
+        details: errorMessage,
+        suggestion: 'Please try again in a few minutes or contact support if the issue persists'
       },
       { status: 500 }
     )

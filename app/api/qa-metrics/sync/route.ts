@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 import { createJiraClient } from '@/lib/jira-client'
 import { JiraWorkflowProcessor } from '@/lib/jira-workflow'
+import { cachePool, CacheKeys } from '@/lib/cache-pool'
 
 /**
  * API endpoint to sync QA metrics from Jira

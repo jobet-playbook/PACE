@@ -57,6 +57,18 @@ export default function DashboardPage() {
         const latestRecord = await response.json()
         console.log('✅ Live data fetched from Jira:', latestRecord)
 
+        // Check if we got valid data
+        if (!latestRecord || !latestRecord.output || !latestRecord.rollback_windows) {
+          console.error('❌ Invalid data structure received from API')
+          setQaData({ 
+            error: true, 
+            message: 'Invalid data received from Jira API',
+            instructions: 'Please refresh the page to try again'
+          })
+          setQaLoading(false)
+          return
+        }
+
         // Transform the data for the dashboard
         const { output, critical_wip_tickets, old_qa_wip_tickets } = latestRecord
 
