@@ -6,6 +6,19 @@
 import { JiraClient, JiraTicket } from './jira-client'
 
 // ============================================================
+// TIMEZONE UTILITIES
+// ============================================================
+
+/**
+ * Convert UTC date to EST/EDT
+ */
+function toEST(date: Date | string): Date {
+  const d = typeof date === 'string' ? new Date(date) : date
+  // Convert to EST (UTC-5) or EDT (UTC-4) depending on DST
+  return new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+}
+
+// ============================================================
 // TYPES
 // ============================================================
 
@@ -139,17 +152,21 @@ const ROLLBACK_WINDOWS: RollbackWindow[] = [
 ]
 
 /**
- * Calculate business days between two dates
+ * Calculate business days between two dates (in EST timezone)
  */
 export function getBusinessDays(start: Date, end: Date): number {
+  // Convert to EST for accurate business day calculation
+  const startEST = toEST(start)
+  const endEST = toEST(end)
+  
   const msPerDay = 1000 * 60 * 60 * 24
-  const diffDays = Math.floor((end.getTime() - start.getTime()) / msPerDay) + 1
+  const diffDays = Math.floor((endEST.getTime() - startEST.getTime()) / msPerDay) + 1
   
   const fullWeeks = Math.floor(diffDays / 7)
   let businessDays = fullWeeks * 5
   
   const remainingDays = diffDays % 7
-  const startDay = start.getDay()
+  const startDay = startEST.getDay()
   
   for (let i = 0; i < remainingDays; i++) {
     const day = (startDay + i) % 7

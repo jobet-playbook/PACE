@@ -207,45 +207,60 @@ export default function DashboardPage() {
         // Transform data for TRIPS Testing section using rollback window data
         const w7Data = rollback_windows?.w7
         const w28Data = rollback_windows?.w28
+        const priorW28Data = rollback_windows?.prior_w28
         
-        const testingTeamData = w7Data?.throughput?.per_qa_member_throughput?.map((member: any) => {
-          // Get 7-day data
-          const sp7 = member.unique_ticket_story_points || 0
-          const tickets7 = member.unique_ticket_count || 0
-          
-          // Find 28-day data for the same member
-          const member28 = w28Data?.throughput?.per_qa_member_throughput?.find(
-            (m: any) => m.qa_name === member.qa_name
-          )
-          const sp28 = member28?.unique_ticket_story_points || 0
-          const tickets28 = member28?.unique_ticket_count || 0
-          
-          // Calculate daily pace from 7-day window
-          const dailyPace = sp7 / 7
-          
-          return {
-            name: member.qa_name,
-            pace: {
-              7: sp7,
-              14: sp7 * 2, // Estimate
-              30: sp28 || (sp7 * 4), // Use 28-day data or estimate
-            },
-            sp: {
-              7: sp7,
-              14: sp7 * 2,
-              30: sp28 || (sp7 * 4),
-            },
-            tickets: {
-              7: tickets7,
-              14: tickets7 * 2,
-              30: tickets28 || (tickets7 * 4),
-            },
-            avg60DailyPace: dailyPace,
-          }
-        }) || []
+        // Use throughput data if available, otherwise use WIP data to show current workload
+        const hasThroughput = w7Data?.throughput?.per_qa_member_throughput?.length > 0
+        
+        let testingTeamData = []
+        
+        if (hasThroughput) {
+          // Use completed tickets data
+          testingTeamData = w7Data.throughput.per_qa_member_throughput.map((member: any) => {
+            const sp7 = member.unique_ticket_story_points || 0
+            const tickets7 = member.unique_ticket_count || 0
+            
+            const member28 = w28Data?.throughput?.per_qa_member_throughput?.find(
+              (m: any) => m.qa_name === member.qa_name
+            )
+            const sp28 = member28?.unique_ticket_story_points || 0
+            const tickets28 = member28?.unique_ticket_count || 0
+            
+            const dailyPace = sp7 / 7
+            
+            return {
+              name: member.qa_name,
+              pace: { 7: sp7, 14: sp7 * 2, 30: sp28 || (sp7 * 4) },
+              sp: { 7: sp7, 14: sp7 * 2, 30: sp28 || (sp7 * 4) },
+              tickets: { 7: tickets7, 14: tickets7 * 2, 30: tickets28 || (tickets7 * 4) },
+              avg60DailyPace: dailyPace,
+            }
+          })
+        } else {
+          // Use WIP data to show current workload when no recent completions
+          testingTeamData = w7Data?.qa_in_progress?.per_qa_member_qa_in_progress?.map((member: any) => {
+            const wipSP = member.qa_tickets_wip_story_points_total || 0
+            const wipTickets = member.qa_tickets_wip_count || 0
+            
+            // Use prior 28-day throughput for historical context
+            const memberPrior = priorW28Data?.throughput?.per_qa_member_throughput?.find(
+              (m: any) => m.qa_name === member.qa_assignee
+            )
+            const priorSP = memberPrior?.unique_ticket_story_points || 0
+            const priorTickets = memberPrior?.unique_ticket_count || 0
+            
+            return {
+              name: member.qa_assignee,
+              pace: { 7: wipSP, 14: wipSP, 30: priorSP || wipSP },
+              sp: { 7: wipSP, 14: wipSP, 30: priorSP || wipSP },
+              tickets: { 7: wipTickets, 14: wipTickets, 30: priorTickets || wipTickets },
+              avg60DailyPace: priorSP / 28 || 0,
+            }
+          }) || []
+        }
 
         setTestingData(testingTeamData)
-        console.log('🧪 Testing team data:', testingTeamData)
+        console.log('🧪 Testing team data:', testingTeamData, '(using', hasThroughput ? 'throughput' : 'WIP', 'data)')
 
       } catch (error) {
         console.error('Failed to fetch QA data:', error)
