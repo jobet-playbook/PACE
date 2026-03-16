@@ -57,15 +57,22 @@ export class JiraClient {
   /**
    * Search for issues using JQL
    */
-  async searchIssues(jql: string, expand?: string[]): Promise<JiraTicket[]> {
-    // Use the new /search/jql endpoint as per Jira Cloud API migration
+  async searchIssues(
+    jql: string,
+    expand?: string[],
+    options?: { fields?: string; maxResults?: number }
+  ): Promise<JiraTicket[]> {
     const params = new URLSearchParams({
       jql,
-      maxResults: '1000'
+      maxResults: String(options?.maxResults ?? 1000)
     })
 
     if (expand && expand.length > 0) {
       params.append('expand', expand.join(','))
+    }
+
+    if (options?.fields) {
+      params.append('fields', options.fields)
     }
 
     const url = `${this.baseUrl}/rest/api/3/search/jql?${params.toString()}`

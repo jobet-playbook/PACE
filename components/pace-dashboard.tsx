@@ -79,6 +79,7 @@ export function PaceDashboardTab({
   const finalAgingTitle = agingTableTitle ?? `Aging in ${label} (${agingThreshold})`
 
   const filteredCritical = useMemo(() => {
+    if (!criticalTickets || !Array.isArray(criticalTickets)) return []
     return criticalTickets.filter(t => {
       if (filterMember !== "all" && t.assignee !== filterMember) return false
       if (filterStatus !== "all" && t.status !== filterStatus) return false
@@ -87,6 +88,7 @@ export function PaceDashboardTab({
   }, [criticalTickets, filterMember, filterStatus])
 
   const filteredAging = useMemo(() => {
+    if (!agingTickets || !Array.isArray(agingTickets)) return []
     return agingTickets.filter(t => {
       if (filterMember !== "all" && t.assignee !== filterMember) return false
       if (filterStatus !== "all" && t.status !== filterStatus) return false

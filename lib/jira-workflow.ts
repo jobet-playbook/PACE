@@ -202,10 +202,14 @@ export function extractQAMembers(ticket: JiraTicket): TicketWithQAData {
   }
 
   for (const history of ticket.changelog.histories) {
+    if (!history || !history.items) continue
+    
     for (const item of history.items) {
+      if (!item || !item.field) continue
+      
       // Track QA assignments
       if (item.field === 'status' && qaStatus.has(item.toString)) {
-        const created = new Date(history.created)
+        const created = history.created ? new Date(history.created) : new Date()
         
         if (latestQAInstance === null || created > latestQAInstance) {
           latestQAInstance = created
@@ -216,9 +220,9 @@ export function extractQAMembers(ticket: JiraTicket): TicketWithQAData {
         }
 
         assignees.push({
-          historyId: history.id,
-          qa_member: history.author.displayName,
-          status: item.fromString
+          historyId: history.id || '',
+          qa_member: history.author?.displayName || 'Unknown',
+          status: item.fromString || ''
         })
       }
 
@@ -268,7 +272,9 @@ export function extractQAInstances(ticket: JiraTicket) {
   }
 
   for (const history of ticket.changelog.histories) {
+    if (!history || !history.items) continue
     for (const item of history.items) {
+      if (!item || !item.field) continue
       if (item.field === 'status' && qaStatus.has(item.toString)) {
         const created = new Date(history.created)
         
@@ -310,7 +316,7 @@ export function calculateCycleTime(
 ): CycleTimeMetrics {
   // To QA: Created → First QA
   const toQAValues = qaTickets
-    .filter(t => t.first_qa_instance)
+    .filter(t => t.first_qa_instance && t.fields?.created)
     .map(t => {
       const created = new Date(t.fields.created)
       return getBusinessDays(created, t.first_qa_instance!)
@@ -416,12 +422,16 @@ export function calculateWIP(qaTickets: TicketWithQAData[]): WIPMetrics {
   const now = new Date()
 
   for (const ticket of qaTickets) {
+    if (!ticket || !ticket.fields) continue
     if (!ticket.first_qa_instance || !ticket.latest_qa_instance) continue
 
     const assigneeName = ticket.fields.assignee?.displayName ?? 'unassigned'
     const sp = ticket.fields.customfield_10028 || 0
     const ticket_age_bd = getBusinessDays(ticket.first_qa_instance, now)
     const latest_ticket_age_bd = getBusinessDays(ticket.latest_qa_instance, now)
+    const statusName = ticket.fields.status?.name || 'Unknown'
+    const priorityName = ticket.fields.priority?.name || 'None'
+    const summary = ticket.fields.summary || 'No summary'
 
     if (!qa_in_progress.has(assigneeName)) {
       qa_in_progress.set(assigneeName, {
@@ -439,10 +449,10 @@ export function calculateWIP(qaTickets: TicketWithQAData[]): WIPMetrics {
     qa_entry.tickets.push({
       ticket_key: ticket.key,
       story_points: sp,
-      qa_status: ticket.fields.status.name,
+      qa_status: statusName,
       age_bd: ticket_age_bd,
       recent_age_bd: latest_ticket_age_bd,
-      summary: ticket.fields.summary
+      summary: summary
     })
 
     // Old tickets (age > 3 days)
@@ -455,16 +465,16 @@ export function calculateWIP(qaTickets: TicketWithQAData[]): WIPMetrics {
         assignee: assigneeName,
         developer: ticket.fields.customfield_10034?.[0]?.displayName || 'Unknown',
         story_points: sp,
-        qa_status: ticket.fields.status.name,
-        priority: ticket.fields.priority.name,
+        qa_status: statusName,
+        priority: priorityName,
         age_bd: ticket_age_bd,
         recent_age_bd: latest_ticket_age_bd,
-        summary: ticket.fields.summary
+        summary: summary
       })
     }
 
     // Critical tickets
-    if (criticalRiskStatus.has(ticket.fields.priority.name.toLowerCase()) && ticket_age_bd >= 1) {
+    if (priorityName && criticalRiskStatus.has(priorityName.toLowerCase()) && ticket_age_bd >= 1) {
       critical_tickets.push({
         ticket_key: ticket.key,
         initial_qa_date: ticket.first_qa_instance.toISOString(),
@@ -473,11 +483,11 @@ export function calculateWIP(qaTickets: TicketWithQAData[]): WIPMetrics {
         assignee: assigneeName,
         developer: ticket.fields.customfield_10034?.[0]?.displayName || 'Unknown',
         story_points: sp,
-        qa_status: ticket.fields.status.name,
-        priority: ticket.fields.priority.name,
+        qa_status: statusName,
+        priority: priorityName,
         age_bd: ticket_age_bd,
         recent_age_bd: latest_ticket_age_bd,
-        summary: ticket.fields.summary
+        summary: summary
       })
     }
 
@@ -579,62 +589,63 @@ export class JiraWorkflowProcessor {
 
   /**
    * Process a single rollback window
+   * Matches n8n workflow structure with 3 queries instead of 4
    */
   async processRollbackWindow(window: RollbackWindow): Promise<RollbackWindowData> {
     console.log(`📊 Processing rollback window: ${window.title}`)
 
-    // Fetch tickets
-    const [doneTickets, wipTickets, defectTickets, pushbackTickets] = await Promise.all([
-      // Done tickets - tickets that changed FROM QA status during the time window
-      // This captures tickets moving to Push Staging, Push Production, or Done
+    const startDay = -(window.days + window.prior_days)
+    const endDay = -window.prior_days
+    const countedStatusList = COUNTED_STATUS.map(s => `"${s}"`).join(', ')
+    const finalStatusList = '"Push Staging", "Push Production", "Done"'
+    const pushbackStatusList = '"In Progress"'
+
+    // Fetch tickets using n8n workflow structure (3 queries instead of 4)
+    const [finalStatusTickets, pushbackTickets, trackedStatusTickets] = await Promise.all([
+      // 1. JIRA: Final Status - tickets that changed TO final status (Done, Push Staging, Push Production)
       this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED FROM (${COUNTED_STATUS.map(s => `"${s}"`).join(', ')}) DURING (startOfDay(${-(window.days + window.prior_days)}), endOfDay(${-window.prior_days})) AND status NOT IN ("In Progress", "Open", ${COUNTED_STATUS.map(s => `"${s}"`).join(', ')}) ORDER BY updated DESC`,
+        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED TO (${finalStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
+        ['changelog'],
+        { fields: 'customfield_10028,created,status,creator' }
+      ),
+      
+      // 2. JIRA: Pushback - tickets that moved FROM final status back TO In Progress
+      this.jiraClient.searchIssues(
+        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED FROM (${finalStatusList}) TO (${pushbackStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
         ['changelog']
       ),
       
-      // WIP tickets - tickets currently IN QA status
+      // 3. JIRA: Tracked Status - tickets that changed TO QA status and are still IN QA status
       this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status IN (${COUNTED_STATUS.map(s => `"${s}"`).join(', ')}) ORDER BY updated DESC`,
-        ['changelog']
-      ),
-      
-      // Defect tickets - tickets that went back from Done to In Progress
-      this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status NOT IN ("Done") AND status CHANGED FROM ("Done") TO ("Open", "In Progress") AFTER startOfDay(${-(window.days + window.prior_days)}) BEFORE endOfDay(${-window.prior_days}) ORDER BY updated DESC`
-      ),
-      
-      // Pushback tickets - tickets that moved FROM QA back to In Progress
-      this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED FROM (${COUNTED_STATUS.map(s => `"${s}"`).join(', ')}) TO ("In Progress") AFTER startOfDay(${-(window.days + window.prior_days)}) BEFORE endOfDay(${-window.prior_days}) ORDER BY updated DESC`,
-        ['changelog']
+        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED TO (${countedStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) AND status IN (${countedStatusList}) ORDER BY updated DESC`,
+        ['changelog'],
+        { fields: 'created,summary,priority,assignee,status,creator', maxResults: 1000 }
       )
     ])
 
-    console.log(`  ✓ Done: ${doneTickets.length}, WIP: ${wipTickets.length}, Defects: ${defectTickets.length}, Pushback: ${pushbackTickets.length}`)
+    console.log(`  ✓ Final Status: ${finalStatusTickets.length}, Pushback: ${pushbackTickets.length}, Tracked Status (WIP): ${trackedStatusTickets.length}`)
 
-    // Get changelogs for done tickets
-    const doneWithHistory = await this.jiraClient.batchGetIssuesWithChangelog(
-      doneTickets.map(t => t.key)
-    )
-    const doneWithQAData = doneWithHistory.map(extractQAMembers)
+    // Process tickets with QA data extraction
+    // Note: n8n already includes changelog in the response, so we use the tickets directly
+    const finalStatusWithQAData = finalStatusTickets.map(extractQAMembers)
+    const trackedStatusWithQAData = trackedStatusTickets.map(extractQAMembers)
+    const pushbackWithQAData = pushbackTickets.map(extractQAMembers)
 
-    // Get changelogs for WIP tickets
-    const wipWithHistory = wipTickets.length > 0 
-      ? await this.jiraClient.batchGetIssuesWithChangelog(wipTickets.map(t => t.key))
-      : []
-    const wipWithQAData = wipWithHistory.map(extractQAMembers)
-
-    // Get changelogs for pushback tickets
-    const pushbackWithHistory = pushbackTickets.length > 0
-      ? await this.jiraClient.batchGetIssuesWithChangelog(pushbackTickets.map(t => t.key))
-      : []
-    const pushbackWithQAData = pushbackWithHistory.map(extractQAMembers)
-
-    // Calculate metrics
-    const cycle_time = calculateCycleTime(wipWithQAData, doneWithQAData, pushbackWithQAData)
-    const throughput = calculateThroughput(doneWithQAData)
-    const qa_in_progress = calculateWIP(wipWithQAData)
-    const defects = calculateDefects(defectTickets)
+    // Calculate metrics using n8n workflow data
+    const cycle_time = calculateCycleTime(trackedStatusWithQAData, finalStatusWithQAData, pushbackWithQAData)
+    const throughput = calculateThroughput(finalStatusWithQAData)
+    const qa_in_progress = calculateWIP(trackedStatusWithQAData)
+    
+    // Defects are derived from pushback tickets (tickets that went back to In Progress)
+    const defects: DefectMetrics = {
+      escaped_defects_count: pushbackTickets.length,
+      critical_defects: {
+        total_count: 0,
+        unresolved_count: 0,
+        resolved_count: 0,
+        old_unresolved: []
+      }
+    }
 
     return {
       rollback_window_description: window.title,

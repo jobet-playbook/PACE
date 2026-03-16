@@ -1,279 +1,213 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 import { createJiraClient } from '@/lib/jira-client'
 import { JiraWorkflowProcessor } from '@/lib/jira-workflow'
 import { cachePool, CacheKeys } from '@/lib/cache-pool'
+import { readFromNormalizedTables, writeToNormalizedTables, getLastBusinessDay } from '@/lib/qa-metrics-db'
 
 /**
- * API endpoint to fetch and process live QA metrics from Jira
- * Uses multi-layer cache pool to combat rate limiting and improve performance
+ * GET /api/qa-metrics/live
+ *
+ * Read priority (fastest → slowest, stops at first hit):
+ *  1. In-memory cache          (5-min TTL, instant)
+ *  2. Normalized pace_qa_* tables (< 23 h old, written by sync cron)
+ *  3. Live Jira API            (fallback – writes to normalized tables + warms cache)
  */
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   const cacheKey = CacheKeys.LIVE_METRICS
-  
-  try {
-    console.log('🔄 [Live] Fetching QA metrics...')
 
-    // 1. Try to get from cache pool (memory + Supabase)
-    const cachedData = await cachePool.get(cacheKey)
-    if (cachedData) {
-      return NextResponse.json({
-        ...cachedData,
-        _cached: true,
-        _source: 'cache_pool'
-      })
+  try {
+    // ── 1. Memory cache ───────────────────────────────────────────────────
+    const cached = await cachePool.get(cacheKey)
+    if (cached) {
+      return NextResponse.json({ ...cached, _cached: true, _source: 'memory_cache' })
     }
 
-    console.log('📊 [Live] Cache miss, fetching from Jira...')
+    // ── 2. Normalized Supabase tables ─────────────────────────────────────
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-    // Check if Jira credentials are configured
+    if (supabaseUrl && supabaseKey) {
+      const supabase = createClient(supabaseUrl, supabaseKey)
+      const fromDb = await readFromNormalizedTables(supabase)
+      if (fromDb) {
+        await cachePool.set(cacheKey, fromDb)
+        return NextResponse.json({ ...fromDb, _cached: true, _source: 'normalized_tables' })
+      }
+    }
+
+    // ── 3. Live Jira API ──────────────────────────────────────────────────
+    console.log('📊 [Live] No recent DB data — fetching from Jira...')
+
     const jiraBaseUrl = process.env.JIRA_BASE_URL
-    const jiraEmail = process.env.JIRA_EMAIL
-    const jiraToken = process.env.JIRA_API_TOKEN
+    const jiraEmail   = process.env.JIRA_EMAIL
+    const jiraToken   = process.env.JIRA_API_TOKEN
 
     if (!jiraBaseUrl || !jiraEmail || !jiraToken || jiraToken.includes('BLANK_VALUE')) {
-      console.error('❌ [QA Metrics Live] Jira credentials not configured')
       return NextResponse.json(
-        { 
+        {
           error: 'Jira credentials not configured',
-          message: 'Please add JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN to your .env.local file',
-          instructions: 'Get your API token from: https://id.atlassian.com/manage-profile/security/api-tokens'
+          message: 'Add JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN to .env.local',
+          instructions: 'Get your API token from: https://id.atlassian.com/manage-profile/security/api-tokens',
         },
         { status: 500 }
       )
     }
 
-    // Initialize Jira client
     const jiraClient = createJiraClient()
-    const processor = new JiraWorkflowProcessor(jiraClient)
+    const processor  = new JiraWorkflowProcessor(jiraClient)
 
-    // Process all rollback windows
-    console.log('📊 [QA Metrics Live] Processing rollback windows...')
+    console.log('📊 [Live] Processing rollback windows...')
     const rollback_windows = await processor.processAllWindows()
 
-    // Extract deduplicated critical and old WIP tickets
-    const allCritical = new Set<string>()
-    const allOld = new Set<string>()
+    // Deduplicate WIP tickets
+    const seenCritical = new Set<string>()
+    const seenOld      = new Set<string>()
     const critical_qa_wip_tickets: any[] = []
-    const old_qa_wip_tickets: any[] = []
+    const old_qa_wip_tickets: any[]      = []
 
     for (const data of Object.values(rollback_windows)) {
-      for (const ticket of data.qa_in_progress.critical_qa_wip_tickets) {
-        if (!allCritical.has(ticket.ticket_key)) {
-          allCritical.add(ticket.ticket_key)
+      if (!data?.qa_in_progress) continue
+
+      for (const ticket of data.qa_in_progress.critical_qa_wip_tickets ?? []) {
+        if (ticket?.ticket_key && !seenCritical.has(ticket.ticket_key)) {
+          seenCritical.add(ticket.ticket_key)
           critical_qa_wip_tickets.push(ticket)
         }
       }
 
-      for (const ticket of data.qa_in_progress.old_qa_wip_tickets) {
-        if (!allOld.has(ticket.ticket_key)) {
-          allOld.add(ticket.ticket_key)
+      for (const ticket of data.qa_in_progress.old_qa_wip_tickets ?? []) {
+        if (ticket?.ticket_key && !seenOld.has(ticket.ticket_key)) {
+          seenOld.add(ticket.ticket_key)
           old_qa_wip_tickets.push(ticket)
         }
       }
     }
 
-    console.log('✅ [QA Metrics Live] Processed rollback windows')
-    console.log(`  - Critical WIP tickets: ${critical_qa_wip_tickets.length}`)
-    console.log(`  - Old WIP tickets: ${old_qa_wip_tickets.length}`)
+    // Build last_30_business_days with actual first/repeat breakdown
+    const w28Throughput = rollback_windows.w28?.throughput
+    const w28Tickets: any[] = (w28Throughput?.per_qa_member_throughput ?? []).flatMap(
+      (m: any) => m.tickets ?? []
+    )
+    const firstPassCount = w28Tickets.filter((t: any) => !t.had_previous_returns).length
+    const repeatCount    = w28Tickets.filter((t: any) => t.had_previous_returns).length
+    const firstPassSP    = w28Tickets.filter((t: any) => !t.had_previous_returns).reduce((s: number, t: any) => s + (t.story_points ?? 0), 0)
+    const repeatSP       = w28Tickets.filter((t: any) => t.had_previous_returns).reduce((s: number, t: any) => s + (t.story_points ?? 0), 0)
 
-    // Calculate last 30 business days summary from w28 data
-    const w28Data = rollback_windows.w28
     const last_30_business_days = {
-      total_tickets: w28Data.throughput.total_tickets,
-      story_points: w28Data.throughput.total_story_points,
-      first_qa_cycle: {
-        ticket_count: Math.round(w28Data.throughput.total_tickets * 0.7), // Estimate
-        story_points: Math.round(w28Data.throughput.total_story_points * 0.7)
-      },
-      returning_qa_cycle: {
-        ticket_count: Math.round(w28Data.throughput.total_tickets * 0.3),
-        story_points: Math.round(w28Data.throughput.total_story_points * 0.3)
-      },
-      qa_handlers: w28Data.throughput.per_qa_member_throughput.map(member => ({
-        qa_assignee: member.qa_name,
-        handled_ticket_count: member.unique_ticket_count,
-        handled_ticket_story_points: member.unique_ticket_story_points
-      }))
+      total_tickets: w28Throughput?.total_tickets ?? 0,
+      story_points:  w28Throughput?.total_story_points ?? 0,
+      first_qa_cycle: { ticket_count: firstPassCount, story_points: firstPassSP },
+      returning_qa_cycle: { ticket_count: repeatCount, story_points: repeatSP },
+      qa_handlers: (w28Throughput?.per_qa_member_throughput ?? []).map((m: any) => ({
+        qa_assignee: m.qa_name,
+        handled_ticket_count: m.unique_ticket_count,
+        handled_ticket_story_points: m.unique_ticket_story_points,
+      })),
     }
 
-    // Build response in the format expected by the UI
     const response = {
       output: {
         report_meta: {
           generated_at_et: new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }),
           report_type: 'Daily QA Performance Report',
           today_label: new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' }),
-          last_business_day_label: getLastBusinessDay().toLocaleDateString('en-US', { timeZone: 'America/New_York' })
+          last_business_day_label: getLastBusinessDay().toLocaleDateString('en-US', { timeZone: 'America/New_York' }),
         },
-        people: buildPeopleData(rollback_windows.w7)
+        people: buildPeopleData(rollback_windows.w7),
       },
       rollback_windows,
       last_30_business_days,
       critical_qa_wip_tickets,
-      old_qa_wip_tickets
+      old_qa_wip_tickets,
     }
 
-    // 2. Store in cache pool for future requests
-    await cachePool.set(cacheKey, response)
-    console.log('💾 [Live] Data cached successfully')
+    // Persist to normalized tables so future requests skip Jira
+    if (supabaseUrl && supabaseKey) {
+      const supabase = createClient(supabaseUrl, supabaseKey)
+      writeToNormalizedTables(supabase, response).catch(err =>
+        console.error('⚠️ [Live] Failed to write normalized tables:', err)
+      )
+    }
 
-    return NextResponse.json({
-      ...response,
-      _cached: false,
-      _source: 'jira_api'
-    })
+    // Warm memory cache
+    await cachePool.set(cacheKey, response)
+
+    return NextResponse.json({ ...response, _cached: false, _source: 'jira_api' })
 
   } catch (error) {
-    console.error('❌ [Live] Error fetching live data:', error)
-    
-    // 3. On error, try to return stale cache (up to 24 hours old)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    const isRateLimitError = errorMessage.includes('429') || errorMessage.includes('rate limit')
-    
-    if (isRateLimitError) {
-      console.log('⚠️ [Live] Rate limit detected, attempting stale cache fallback...')
-      const staleData = await cachePool.getStale(cacheKey)
-      
-      if (staleData) {
-        return NextResponse.json({
-          ...staleData,
-          _cached: true,
-          _stale: true,
-          _rateLimited: true,
-          _source: 'stale_cache'
-        })
+    console.error('❌ [Live] Error:', error)
+
+    const message = error instanceof Error ? error.message : 'Unknown error'
+    const isRateLimit = message.includes('429') || message.toLowerCase().includes('rate limit')
+
+    if (isRateLimit) {
+      const stale = await cachePool.getStale(cacheKey)
+      if (stale) {
+        return NextResponse.json({ ...stale, _cached: true, _stale: true, _rateLimited: true, _source: 'stale_cache' })
       }
     }
-    
+
     return NextResponse.json(
-      { 
-        error: 'Failed to fetch live QA metrics from Jira',
-        details: errorMessage,
-        suggestion: 'Please try again in a few minutes or contact support if the issue persists'
-      },
+      { error: 'Failed to fetch QA metrics', details: message },
       { status: 500 }
     )
   }
 }
 
-/**
- * Build people data from rollback window
- */
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 function buildPeopleData(windowData: any) {
-  const people: any[] = []
   const qaMembers = new Map<string, any>()
 
-  // Aggregate data by QA member
-  for (const member of windowData.throughput.per_qa_member_throughput) {
-    if (!qaMembers.has(member.qa_name)) {
-      // Calculate actual first pass vs repeat pass from tickets
-      const firstPassTickets = member.tickets.filter((t: any) => !t.had_previous_returns)
-      const repeatPassTickets = member.tickets.filter((t: any) => t.had_previous_returns)
-      const firstPassCount = firstPassTickets.length
-      const repeatPassCount = repeatPassTickets.length
-      const repeatPercentage = member.unique_ticket_count > 0 
-        ? Math.round((repeatPassCount / member.unique_ticket_count) * 100) 
+  for (const member of windowData?.throughput?.per_qa_member_throughput ?? []) {
+    if (qaMembers.has(member.qa_name)) continue
+
+    const firstPassTickets  = (member.tickets ?? []).filter((t: any) => !t.had_previous_returns)
+    const repeatPassTickets = (member.tickets ?? []).filter((t: any) => t.had_previous_returns)
+    const repeatPercentage  =
+      member.unique_ticket_count > 0
+        ? Math.round((repeatPassTickets.length / member.unique_ticket_count) * 100)
         : 0
 
-      qaMembers.set(member.qa_name, {
-        qa_assignee: member.qa_name,
-        today_stats: {
-          ticket_count: member.unique_ticket_count,
-          story_points: member.unique_ticket_story_points,
-          first_time_count: firstPassCount,
-          repeat_count: repeatPassCount,
-          repeat_percentage: repeatPercentage
-        },
-        today_tickets: member.tickets.map((ticket: any) => {
-          // Extract completion time from history_created or use current time
-          const completionTime = ticket.history_created 
-            ? new Date(ticket.history_created).toLocaleTimeString('en-US', { 
-                timeZone: 'America/New_York',
-                hour: 'numeric',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true
-              }) + ' ET'
-            : new Date().toLocaleTimeString('en-US', { 
-                timeZone: 'America/New_York',
-                hour: 'numeric',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: true
-              }) + ' ET'
+    qaMembers.set(member.qa_name, {
+      qa_assignee: member.qa_name,
+      today_stats: {
+        ticket_count: member.unique_ticket_count,
+        story_points: member.unique_ticket_story_points,
+        first_time_count: firstPassTickets.length,
+        repeat_count: repeatPassTickets.length,
+        repeat_percentage: repeatPercentage,
+      },
+      today_tickets: (member.tickets ?? []).map((ticket: any) => {
+        const completionTime = ticket.history_created
+          ? new Date(ticket.history_created).toLocaleTimeString('en-US', {
+              timeZone: 'America/New_York',
+              hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+            }) + ' ET'
+          : new Date().toLocaleTimeString('en-US', {
+              timeZone: 'America/New_York',
+              hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+            }) + ' ET'
 
-          return {
-            ticket_id: ticket.ticket_key,
-            completed_time_et: completionTime,
-            story_points: ticket.story_points,
-            handled_stage: ticket.handled_stage,
-            new_stage: 'Done',
-            pass_type: ticket.had_previous_returns ? 'repeat_pass' : 'first_time_pass',
-            qa_return_cycles_count: ticket.qa_return_cycles_count || 0,
-            had_previous_returns: ticket.had_previous_returns || false,
-            recap: `${ticket.ticket_key} completed QA (${ticket.story_points || 0} pt${ticket.story_points === 1 ? '' : 's'}, ${ticket.had_previous_returns ? 'repeat' : 'first-time'} pass) moving from ${ticket.handled_stage} to Done.`
-          }
-        }),
-        last_business_day_stats: {
-          ticket_count: 0,
-          story_points: 0,
-          first_time_count: 0,
-          repeat_count: 0,
-          repeat_percentage: 0
-        },
-        last_business_day_tickets: []
-      })
-    }
-  }
-
-  // Add WIP data
-  for (const member of windowData.qa_in_progress.per_qa_member_qa_in_progress) {
-    if (!qaMembers.has(member.qa_assignee)) {
-      qaMembers.set(member.qa_assignee, {
-        qa_assignee: member.qa_assignee,
-        today_stats: {
-          ticket_count: 0,
-          story_points: 0,
-          first_time_count: 0,
-          repeat_count: 0,
-          repeat_percentage: 0
-        },
-        today_tickets: [],
-        last_business_day_stats: {
-          ticket_count: 0,
-          story_points: 0,
-          first_time_count: 0,
-          repeat_count: 0,
-          repeat_percentage: 0
-        },
-        last_business_day_tickets: []
-      })
-    }
-
-    const memberData = qaMembers.get(member.qa_assignee)
-    memberData.wip_count = member.qa_tickets_wip_count
-    memberData.wip_story_points = member.qa_tickets_wip_story_points_total
+        return {
+          ticket_id: ticket.ticket_key,
+          completed_time_et: completionTime,
+          story_points: ticket.story_points,
+          handled_stage: ticket.handled_stage,
+          new_stage: 'Done',
+          pass_type: ticket.had_previous_returns ? 'repeat_pass' : 'first_time_pass',
+          qa_return_cycles_count: ticket.qa_return_cycles_count ?? 0,
+          had_previous_returns: ticket.had_previous_returns ?? false,
+          recap: `${ticket.ticket_key} completed QA (${ticket.story_points ?? 0} pt${ticket.story_points === 1 ? '' : 's'}, ${ticket.had_previous_returns ? 'repeat' : 'first-time'} pass) moving from ${ticket.handled_stage} to Done.`,
+        }
+      }),
+      last_business_day_stats: {
+        ticket_count: 0, story_points: 0, first_time_count: 0, repeat_count: 0, repeat_percentage: 0,
+      },
+      last_business_day_tickets: [],
+    })
   }
 
   return Array.from(qaMembers.values())
-}
-
-/**
- * Helper: Get last business day
- */
-function getLastBusinessDay(): Date {
-  const date = new Date()
-  let daysToSubtract = 1
-
-  // If today is Monday, go back to Friday
-  if (date.getDay() === 1) {
-    daysToSubtract = 3
-  }
-  // If today is Sunday, go back to Friday
-  else if (date.getDay() === 0) {
-    daysToSubtract = 2
-  }
-
-  date.setDate(date.getDate() - daysToSubtract)
-  return date
 }
