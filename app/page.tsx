@@ -31,6 +31,8 @@ export default function DashboardPage() {
   const [qaData, setQaData] = useState<any>(null)
   const [qaLoading, setQaLoading] = useState(true)
   const [testingData, setTestingData] = useState<any>(null)
+  const [crData, setCrData] = useState<any>(null)
+  const [crLoading, setCrLoading] = useState(true)
 
   useEffect(() => {
     async function fetchQAData() {
@@ -70,7 +72,7 @@ export default function DashboardPage() {
         }
 
         // Transform the data for the dashboard
-        const { output, critical_wip_tickets, old_qa_wip_tickets } = latestRecord
+        const { output, critical_qa_wip_tickets, old_qa_wip_tickets } = latestRecord
 
         const { rollback_windows } = latestRecord
         
@@ -85,11 +87,11 @@ export default function DashboardPage() {
               prior28: rollback_windows?.prior_w28?.throughput?.total_story_points || 0,
             },
             pace: {
-              last7: output?.today_overview?.repeat_percentage || 0,
-              last28: 0,
+              last7: Math.round(rollback_windows?.w7?.throughput?.total_qa_phase_story_points || 0),
+              last28: Math.round(rollback_windows?.w28?.throughput?.total_qa_phase_story_points || 0),
             },
             assignedVolume: {
-              totalTickets: rollback_windows?.w7?.qa_in_progress?.total_tickets || (critical_wip_tickets?.length || 0) + (old_qa_wip_tickets?.length || 0),
+              totalTickets: rollback_windows?.w7?.qa_in_progress?.total_tickets || (critical_qa_wip_tickets?.length || 0) + (old_qa_wip_tickets?.length || 0),
               totalSP: rollback_windows?.w7?.qa_in_progress?.total_story_points || 0,
               agingOver7: rollback_windows?.w7?.qa_in_progress?.old_qa_wip_tickets?.length || old_qa_wip_tickets?.length || 0,
             },
@@ -107,11 +109,11 @@ export default function DashboardPage() {
             },
             escapedDefects: rollback_windows?.w28?.defects?.escaped_defects_count || 0,
             critBugs: {
-              open: rollback_windows?.w28?.defects?.critical_defects?.unresolved_count || critical_wip_tickets?.length || 0,
+              open: rollback_windows?.w28?.defects?.critical_defects?.unresolved_count || critical_qa_wip_tickets?.length || 0,
               resolved: rollback_windows?.w28?.defects?.critical_defects?.resolved_count || 0,
             },
           },
-          criticalTickets: critical_wip_tickets?.map((ticket: any) => ({
+          criticalTickets: critical_qa_wip_tickets?.map((ticket: any) => ({
             key: ticket.ticket_key,
             recentAge: ticket.recent_age_bd,
             age: ticket.age_bd,
@@ -220,19 +222,31 @@ export default function DashboardPage() {
                 churn: person.last_business_day_stats?.repeat_percentage || 0,
               },
               weekly: {
-                tickets: wipData?.qa_tickets_wip_count || weeklyData?.unique_ticket_count || 0,
-                sp: wipData?.qa_tickets_wip_story_points_total || weeklyData?.unique_ticket_story_points || 0,
-                firstPass: 0,
-                repeatPass: 0,
+                tickets: weeklyData?.unique_ticket_count || 0,
+                sp: weeklyData?.unique_ticket_story_points || 0,
+                firstPass: (weeklyData?.tickets ?? []).filter((t: any) => !t.had_previous_returns).length,
+                repeatPass: (weeklyData?.tickets ?? []).filter((t: any) => t.had_previous_returns).length,
                 avgCycleTime: 0,
               },
-              monthly: {
-                tickets: 0,
-                sp: 0,
-                firstPass: 0,
-                repeatPass: 0,
-                avgCycleTime: 0,
-              },
+              monthly: (() => {
+                const monthlyData = rollback_windows?.w28?.throughput?.per_qa_member_throughput?.find(
+                  (m: any) => m.qa_name === person.qa_assignee
+                )
+                const monthlyTickets = monthlyData?.tickets ?? []
+                const seenM = new Set<string>()
+                const uniqueM = monthlyTickets.filter((t: any) => {
+                  if (seenM.has(t.ticket_key)) return false
+                  seenM.add(t.ticket_key)
+                  return true
+                })
+                return {
+                  tickets: monthlyData?.unique_ticket_count || 0,
+                  sp: monthlyData?.unique_ticket_story_points || 0,
+                  firstPass: uniqueM.filter((t: any) => !t.had_previous_returns).length,
+                  repeatPass: uniqueM.filter((t: any) => t.had_previous_returns).length,
+                  avgCycleTime: 0,
+                }
+              })(),
               dailyRhythm: `Completed ${person.today_stats.ticket_count} tickets`,
               activities: person.today_tickets?.map((ticket: any) => ({
                 ticketKey: ticket.ticket_id,
@@ -318,6 +332,186 @@ export default function DashboardPage() {
     }
     fetchQAData()
   }, [])
+
+  useEffect(() => {
+    async function fetchCRData() {
+      try {
+        const res = await fetch('/api/code-review-metrics/live')
+        const d = await res.json()
+        if (d.error) { setCrData(null); return }
+
+        const { w7, prior_w7, w28, owners, prior_w7_owners, monthly_owners, exclusions, cycle_times, report_date, deltas } = d
+
+        // Build lookups by owner name
+        const priorOwnerMap = new Map<string, any>()
+        for (const po of (prior_w7_owners ?? [])) priorOwnerMap.set(po.owner, po)
+
+        const monthlyOwnerMap = new Map<string, any>()
+        for (const mo of (monthly_owners ?? [])) monthlyOwnerMap.set(mo.owner, mo)
+
+        // Collect all developer names (union of all windows)
+        const allOwnerNames = Array.from(new Set([
+          ...owners.map((o: any) => o.owner),
+          ...(prior_w7_owners ?? []).map((o: any) => o.owner),
+          ...(monthly_owners ?? []).map((o: any) => o.owner),
+        ]))
+
+        // Helper: compute calendar days from a timestamp to now
+        const daysSince = (ts: string | undefined) => {
+          if (!ts) return 0
+          const days = (Date.now() - new Date(ts).getTime()) / (1000 * 60 * 60 * 24)
+          return Math.max(0, parseFloat(days.toFixed(1)))
+        }
+
+        setCrData({
+          metrics: {
+            spThroughput: {
+              last7: w7.weighted_story_points,
+              last7Delta: deltas?.weighted_sp_change_pct ?? 0,
+              last28: w28?.weighted_story_points ?? 0,
+              last28Delta: 0,
+              prior7: prior_w7.weighted_story_points,
+              prior28: 0,
+            },
+            pace: {
+              last7: w7.weighted_story_points,
+              last28: w28?.weighted_story_points ?? 0,
+            },
+            assignedVolume: {
+              totalTickets: w7.total_tickets,
+              totalSP: w7.raw_story_points,
+              agingOver7: exclusions.length,
+            },
+            qCycle: { last7: 0, last28: 0 },
+            tCycle: { last7: 0, last28: 0 },
+            rAgeCycle: {
+              last7: cycle_times?.r_age_cycle_w7 ?? 0,
+              last28: cycle_times?.r_age_cycle_w28 ?? 0,
+            },
+            escapedDefects: 0,
+            critBugs: { open: exclusions.length, resolved: 0 },
+          },
+          criticalTickets: exclusions.map((ex: any) => {
+            const last  = ex.pushback_history[ex.pushback_history.length - 1]
+            const first = ex.pushback_history[0]
+            const firstTs   = first?.cr_activity?.timestamp
+            const latestTs  = last?.pushback_activity?.timestamp
+            return {
+              key: ex.key,
+              recentAge: Math.round(daysSince(latestTs)),
+              age: Math.round(daysSince(firstTs)),
+              sp: null,
+              assignee: last?.assignee ?? 'Unknown',
+              developer: last?.assignee ?? 'Unknown',
+              returnCount: ex.cr_pass_count - 1,
+              firstQA: firstTs
+                ? new Date(firstTs).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' })
+                : '',
+              latestQA: latestTs
+                ? new Date(latestTs).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' })
+                : '',
+              status: last?.pushback_activity?.status ?? 'Unknown',
+              summary: `Re-entered Code Review ${ex.cr_pass_count}x`,
+            }
+          }),
+          agingTickets: [],
+          dailyPerformance: {
+            today: {
+              date: `Last 7 Days (${report_date})`,
+              tickets: w7.total_tickets,
+              sp: w7.raw_story_points,
+              firstPass: w7.pass_distribution.p1,
+              firstPassSP: w7.first_pass_sp ?? 0,
+              repeatPass: w7.total_tickets - w7.pass_distribution.p1,
+              repeatPassSP: w7.repeat_pass_sp ?? 0,
+            },
+            previous: {
+              date: 'Prior 7 Days',
+              tickets: prior_w7.total_tickets,
+              sp: prior_w7.raw_story_points,
+              firstPass: prior_w7.pass_distribution.p1,
+              firstPassSP: prior_w7.first_pass_sp ?? 0,
+              repeatPass: prior_w7.total_tickets - prior_w7.pass_distribution.p1,
+              repeatPassSP: prior_w7.repeat_pass_sp ?? 0,
+            },
+            last30BD: {
+              tickets: w28?.total_tickets ?? 0,
+              sp: w28?.raw_story_points ?? 0,
+              firstPass: w28?.pass_distribution?.p1 ?? 0,
+              repeatPass: (w28?.total_tickets ?? 0) - (w28?.pass_distribution?.p1 ?? 0),
+              repeatPassSP: w28?.repeat_pass_sp ?? 0,
+            },
+          },
+          teamMembers: allOwnerNames.map((name: string) => {
+            const o  = owners.find((x: any) => x.owner === name)
+            const po = priorOwnerMap.get(name)
+            const mo = monthlyOwnerMap.get(name)
+            const churn = o
+              ? (o.ticket_count > 0 ? Math.round((o.repeat_pass_count / o.ticket_count) * 100) : 0)
+              : 0
+            const priorChurn = po
+              ? (po.ticket_count > 0 ? Math.round((po.repeat_pass_count / po.ticket_count) * 100) : 0)
+              : 0
+            return {
+              name,
+              // "today" = this week's w7 data (CR has no per-day breakdown)
+              today: {
+                tickets: o?.ticket_count ?? 0,
+                sp: o?.weighted_sp ?? 0,
+                firstPass: o?.first_pass_count ?? 0,
+                firstPassSP: o?.first_pass_sp ?? 0,
+                repeatPass: o?.repeat_pass_count ?? 0,
+                repeatPassSP: o?.repeat_pass_sp ?? 0,
+                churn,
+              },
+              previousDay: {
+                tickets: po?.ticket_count ?? 0,
+                sp: po?.weighted_sp ?? 0,
+                firstPass: po?.first_pass_count ?? 0,
+                firstPassSP: po?.first_pass_sp ?? 0,
+                repeatPass: po?.repeat_pass_count ?? 0,
+                repeatPassSP: po?.repeat_pass_sp ?? 0,
+                churn: priorChurn,
+              },
+              weekly: {
+                tickets: o?.ticket_count ?? 0,
+                sp: o?.weighted_sp ?? 0,
+                firstPass: o?.first_pass_count ?? 0,
+                repeatPass: o?.repeat_pass_count ?? 0,
+                avgCycleTime: cycle_times?.r_age_cycle_w7 ?? 0,
+              },
+              monthly: {
+                tickets: mo?.ticket_count ?? 0,
+                sp: mo?.weighted_sp ?? 0,
+                firstPass: mo?.first_pass_count ?? 0,
+                repeatPass: mo?.repeat_pass_count ?? 0,
+                avgCycleTime: cycle_times?.r_age_cycle_w28 ?? 0,
+              },
+              dailyRhythm: o
+                ? `${o.ticket_count} ticket${o.ticket_count !== 1 ? 's' : ''} in Code Review this week · ${o.first_pass_count} first-pass, ${o.repeat_pass_count} repeat-pass`
+                : 'No tickets in Code Review this week',
+              activities: (o?.tickets ?? []).map((t: any) => ({
+                ticketKey: t.key,
+                sp: t.story_points ?? 0,
+                type: t.tracked_pass_count === 1 ? 'First Pass' : `Repeat Pass #${t.tracked_pass_count - 1}`,
+                time: '',
+                description: `${t.key} reviewed in Code Review (${t.story_points ?? 0} pts, ${t.tracked_pass_count === 1 ? 'first-time pass' : `repeat pass #${t.tracked_pass_count - 1}`})`,
+              })),
+            }
+          }),
+          allMembers: allOwnerNames,
+          allStatuses: ['Code Review', 'In Progress', 'Ready for Dev'],
+          aiInsights: [],
+        })
+      } catch {
+        setCrData(null)
+      } finally {
+        setCrLoading(false)
+      }
+    }
+    fetchCRData()
+  }, [])
+
   return (
     <main className="min-h-screen bg-background">
       {/* Header */}
@@ -456,28 +650,38 @@ export default function DashboardPage() {
 
           {/* Code Review PACE Tab */}
           <TabsContent value="code-review">
-            <PaceDashboardTab
-              label="Code Review"
-              dashboardType="code-review"
-              metrics={crSnapshotMetrics}
-              criticalTickets={crCriticalTickets}
-              agingTickets={crAgingTickets}
-              dailyPerformance={crDailyPerformance}
-              teamMembers={crTeamMemberPerformance}
-              allMembers={["Davi Chaves", "Joey Stapleton", "Mike Del Signore", "Jordan Beebe"]}
-              allStatuses={crAllStatuses}
-              paceLabel="Code Review PACE"
-              volumeLabel="Assigned to Code Review Volume (Last 7 Days)"
-              qCycleLabel="CR-Cycle (To Code Review)"
-              tCycleLabel="T-Cycle Time (To Ready for Dev)"
-              rAgeLabel="R-Age Cycle Time (CR Pushback)"
-              defectsLabel="[Beta] Code Quality Issues (Last 7 Days)"
-              critBugsLabel="Critical CR Blockers (Last 7 Days)"
-              performanceTitle="Daily Code Review Performance"
-              critTableTitle="Critical Code Review Tickets"
-              agingTableTitle="Aging in Code Review (Age > 3 BD)"
-              aiInsights={crAIInsights}
-            />
+            {crLoading ? (
+              <div className="flex items-center justify-center h-96">
+                <p className="text-muted-foreground">Loading Code Review data...</p>
+              </div>
+            ) : crData ? (
+              <PaceDashboardTab
+                label="Code Review"
+                dashboardType="code-review"
+                metrics={crData.metrics}
+                criticalTickets={crData.criticalTickets}
+                agingTickets={crData.agingTickets}
+                dailyPerformance={crData.dailyPerformance}
+                teamMembers={crData.teamMembers}
+                allMembers={crData.allMembers}
+                allStatuses={crData.allStatuses}
+                paceLabel="Code Review PACE"
+                volumeLabel="Assigned to Code Review Volume (Last 7 Days)"
+                qCycleLabel="CR-Cycle (To Code Review)"
+                tCycleLabel="T-Cycle Time (To Ready for Dev)"
+                rAgeLabel="R-Age Cycle Time (CR Pushback)"
+                defectsLabel="[Beta] Code Quality Issues (Last 7 Days)"
+                critBugsLabel="Critical CR Blockers (Last 7 Days)"
+                performanceTitle="Daily Code Review Performance"
+                critTableTitle="Re-entered Tickets (28 Days)"
+                agingTableTitle="Aging in Code Review (Age > 3 BD)"
+                aiInsights={crData.aiInsights}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-96">
+                <p className="text-muted-foreground">No Code Review data available</p>
+              </div>
+            )}
           </TabsContent>
 
           {/* Infrastructure Tab */}

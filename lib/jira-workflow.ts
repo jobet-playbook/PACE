@@ -346,6 +346,7 @@ export function calculateCycleTime(
  */
 export function calculateThroughput(doneTickets: TicketWithQAData[]): ThroughputMetrics {
   const qa_throughput: Map<string, any> = new Map()
+  const qaStatus = new Set(COUNTED_STATUS)
   let totalStoryPoints = 0
   let totalQAPhaseStoryPoints = 0
 
@@ -379,15 +380,18 @@ export function calculateThroughput(doneTickets: TicketWithQAData[]): Throughput
       throughput.ticket_story_points += sp
       throughput.unique_ticket_story_points += !isDuplicate ? sp : 0
 
-      // Find the history entry for when this ticket left QA
-      const qaExitHistory = ticket.changelog?.histories?.find((h: any) => 
-        h.items.some((item: any) => 
-          item.field === 'status' && 
-          item.fromString === qa_assignee.status &&
-          item.toString !== 'In Progress' &&
-          item.toString !== 'Open'
+      // Find the most recent exit FROM QA status TO a final status
+      // Sorted descending so we get the latest exit (handles multiple QA cycles)
+      const FINAL_STATUSES_QA = new Set(['Push Staging', 'Push Production', 'Done', 'Staging Test'])
+      const qaExitHistory = [...(ticket.changelog?.histories ?? [])]
+        .sort((a: any, b: any) => new Date(b.created).getTime() - new Date(a.created).getTime())
+        .find((h: any) =>
+          h.items.some((item: any) =>
+            item.field === 'status' &&
+            qaStatus.has(item.fromString) &&
+            FINAL_STATUSES_QA.has(item.toString)
+          )
         )
-      )
 
       throughput.tickets.push({
         ticket_key: ticket.key,
@@ -597,7 +601,7 @@ export class JiraWorkflowProcessor {
     const startDay = -(window.days + window.prior_days)
     const endDay = -window.prior_days
     const countedStatusList = COUNTED_STATUS.map(s => `"${s}"`).join(', ')
-    const finalStatusList = '"Push Staging", "Push Production", "Done"'
+    const finalStatusList = '"Push Staging", "Push Production", "Done", "Staging Test"'
     const pushbackStatusList = '"In Progress"'
 
     // Fetch tickets using n8n workflow structure (3 queries instead of 4)
@@ -606,7 +610,7 @@ export class JiraWorkflowProcessor {
       this.jiraClient.searchIssues(
         `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED TO (${finalStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
         ['changelog'],
-        { fields: 'customfield_10028,created,status,creator' }
+        { fields: 'customfield_10028,created,status,creator,statuscategorychangedate,summary,assignee' }
       ),
       
       // 2. JIRA: Pushback - tickets that moved FROM final status back TO In Progress
@@ -615,11 +619,11 @@ export class JiraWorkflowProcessor {
         ['changelog']
       ),
       
-      // 3. JIRA: Tracked Status - tickets that changed TO QA status and are still IN QA status
+      // 3. JIRA: Tracked Status - ALL tickets currently IN QA status (no date filter, matches n8n)
       this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED TO (${countedStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) AND status IN (${countedStatusList}) ORDER BY updated DESC`,
+        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status IN (${countedStatusList}) ORDER BY updated DESC`,
         ['changelog'],
-        { fields: 'created,summary,priority,assignee,status,creator', maxResults: 1000 }
+        { fields: 'created,summary,priority,assignee,status,customfield_10028,customfield_10034,statuscategorychangedate', maxResults: 1000 }
       )
     ])
 
@@ -657,14 +661,65 @@ export class JiraWorkflowProcessor {
   }
 
   /**
+   * Process a single-day window with full individual changelogs.
+   * Used for w1 (today) and prior_w1 (yesterday) to get accurate per-member throughput.
+   * startDay/endDay are negative offsets (e.g. today = startDay=-1, endDay=0).
+   */
+  async processDailyWindow(title: string, startDay: number, endDay: number): Promise<ThroughputMetrics> {
+    console.log(`📊 Processing daily window: ${title} (${startDay} to ${endDay})`)
+
+    const finalStatusList = '"Push Staging", "Push Production", "Done", "Staging Test"'
+    const projects = `"Playbook SaaS - Scrum", "PlayBook App"`
+
+    // 1. Search for tickets that moved to final status in this day range (just keys)
+    const candidates = await this.jiraClient.searchIssues(
+      `project in (${projects}) AND status CHANGED TO (${finalStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
+      [],
+      { fields: 'summary', maxResults: 200 }
+    )
+
+    if (candidates.length === 0) {
+      return { total_story_points: 0, total_qa_phase_story_points: 0, total_tickets: 0, per_qa_member_throughput: [] }
+    }
+
+    console.log(`  → ${candidates.length} tickets found for ${title}, fetching full changelogs...`)
+
+    // 2. Fetch full changelogs individually (bypasses the 50-entry truncation in search API)
+    const fullTickets = await this.jiraClient.batchGetIssuesWithChangelog(candidates.map((t: any) => t.key))
+
+    // 3. Extract QA members and calculate throughput
+    const withQAData = fullTickets.map(extractQAMembers)
+    return calculateThroughput(withQAData)
+  }
+
+  /**
    * Process all rollback windows
    */
   async processAllWindows(): Promise<Record<string, RollbackWindowData>> {
     const results: Record<string, RollbackWindowData> = {}
 
+    // Run main windows sequentially to avoid overwhelming Jira rate limits
     for (const window of ROLLBACK_WINDOWS) {
       results[window.key] = await this.processRollbackWindow(window)
     }
+
+    // Compute prior-business-day offsets (handles weekends/Monday)
+    const todayDow = new Date().getDay() // 0=Sun,1=Mon,...,6=Sat
+    const priorBdOffset = todayDow === 1 ? -4 : todayDow === 0 ? -3 : -2 // Mon→Fri, Sun→Fri, else yesterday
+
+    // Run daily windows in parallel — uses individual changelog fetches for accuracy
+    const [w1Throughput, priorW1Throughput] = await Promise.all([
+      this.processDailyWindow('Today', -1, 0),
+      this.processDailyWindow('Previous Business Day', priorBdOffset, priorBdOffset + 1),
+    ])
+
+    // Store as minimal rollback window entries (throughput only, no WIP/defects)
+    const emptyWip = { total_tickets: 0, total_story_points: 0, old_qa_wip_tickets: [], critical_qa_wip_tickets: [], per_qa_member_qa_in_progress: [] }
+    const emptyDefects = { escaped_defects_count: 0, critical_defects: { total_count: 0, unresolved_count: 0, resolved_count: 0, old_unresolved: [] } }
+    const emptyCycle = { to_qa_avg_bd: 0, to_done_avg_bd: 0, to_pushback_avg_bd: 0 }
+
+    results.w1 = { rollback_window_description: 'Today', cycle_time: emptyCycle, throughput: w1Throughput, qa_in_progress: emptyWip, defects: emptyDefects }
+    results.prior_w1 = { rollback_window_description: 'Previous Business Day', cycle_time: emptyCycle, throughput: priorW1Throughput, qa_in_progress: emptyWip, defects: emptyDefects }
 
     // Deduplicate critical and old WIP tickets across windows
     const allCritical = new Set<string>()

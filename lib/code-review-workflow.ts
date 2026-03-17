@@ -1,328 +1,408 @@
 /**
- * Code Review Workflow Processor
- * Mirrors QA workflow structure but tracks Code Review metrics
+ * Code Review Workflow Processor — mirrors n8n workflow logic
+ *
+ * Tracks tickets that enter "Code Review", counts pushbacks (re-entries),
+ * and computes per-developer (creator) weighted SP output.
+ *
+ * final_status    = ["Code Review"]   — the bottleneck stage being measured
+ * pushback_status = ["In Progress"]  — where tickets go when pushed back
  */
 
 import { JiraClient } from './jira-client'
 
-// Code Review status
-const CODE_REVIEW_STATUS = ['Code Review']
+const FINAL_STATUS = ['Code Review']
+const PUSHBACK_STATUS = ['In Progress']
+const PROJECTS = '"Playbook SaaS - Scrum", "PlayBook App"'
 
-// Rollback windows configuration
-const ROLLBACK_WINDOWS = [
-  { key: 'w7', title: 'Last 7 Business Days', days: 7, prior_days: 0 },
-  { key: 'w28', title: 'Last 28 Business Days', days: 28, prior_days: 0 },
-  { key: 'prior_w7', title: 'Prior 7 Business Days', days: 7, prior_days: 7 },
-  { key: 'prior_w28', title: 'Prior 28 Business Days', days: 28, prior_days: 28 }
-]
+// ── Types ────────────────────────────────────────────────────────────────────
 
-interface RollbackWindow {
+export interface CRFinalTicket {
   key: string
-  title: string
-  days: number
-  prior_days: number
+  creator: string
+  tracked_pass_count: number   // 1 = first-pass, 2+ = had pushbacks
+  story_points: number | null
 }
 
-export interface CodeReviewMetrics {
-  rollback_window_description: string
-  cycle_time: {
-    to_code_review_avg_bd: number  // CR-Cycle: Time to reach Code Review
-    to_ready_for_dev_avg_bd: number  // T-Cycle: Time to Ready for Dev
-    to_pushback_avg_bd: number  // R-Age: CR Pushback time
-  }
-  throughput: {
-    total_story_points: number
-    total_tickets: number
-    pace_sp_per_bd: number
-    per_reviewer_throughput: Array<{
-      reviewer_name: string
-      unique_ticket_count: number
-      unique_ticket_story_points: number
-      tickets: Array<{
-        ticket_key: string
-        story_points: number
-        history_created?: string
-        had_previous_returns: boolean
-        cr_return_cycles_count: number
-      }>
-    }>
-  }
-  code_review_in_progress: {
-    total_tickets: number
-    total_story_points: number
-    per_reviewer_cr_in_progress: Array<{
-      reviewer_assignee: string
-      cr_tickets_wip_count: number
-      cr_tickets_wip_story_points_total: number
-    }>
-  }
-  quality_issues: {
-    critical_blockers_count: number
-    critical_blockers: {
-      total_count: number
-      unresolved_count: number
-      resolved_count: number
-      old_unresolved: Array<{
-        key: string
-        summary: string
-        status: string
-        priority: string
-        age_bd: number
-      }>
-    }
-  }
+export interface CRPushbackEntry {
+  assignee: string
+  cr_pass_number: number
+  cr_activity: { stage: string; timestamp: string } | null
+  pushback_activity: { status: string; timestamp: string }
 }
+
+export interface CRPushbackTicket {
+  key: string
+  cr_pass_count: number
+  pushback_history: CRPushbackEntry[]
+}
+
+export interface CROwnerTicket {
+  key: string
+  story_points: number | null
+  tracked_pass_count: number
+}
+
+export interface CROwner {
+  owner: string
+  ticket_count: number
+  ticket_keys: string
+  tickets: CROwnerTicket[]
+  raw_sp: number
+  weighted_sp: number
+  missing_sp: number
+  first_pass_count: number
+  repeat_pass_count: number
+  first_pass_sp: number
+  repeat_pass_sp: number
+}
+
+export interface CRWindowMetrics {
+  total_tickets: number
+  raw_story_points: number
+  weighted_story_points: number
+  missing_story_points: number
+  first_pass_sp: number
+  repeat_pass_sp: number
+  pass_distribution: { p1: number; p2: number; p3: number; p4plus: number }
+}
+
+export interface CRCycleTimes {
+  r_age_cycle_w7: number    // avg calendar days in CR before pushback (last 7d pushbacks)
+  r_age_cycle_w28: number   // avg calendar days in CR before pushback (last 28d pushbacks)
+}
+
+export interface CRData {
+  w7: CRWindowMetrics
+  prior_w7: CRWindowMetrics
+  w28: CRWindowMetrics
+  owners: CROwner[]              // per-developer, from w7 final tickets
+  prior_w7_owners: CROwner[]     // per-developer, from prior_w7 final tickets
+  monthly_owners: CROwner[]      // per-developer, from w28 final tickets
+  exclusions: CRPushbackTicket[] // tickets with pushbacks, from w28
+  cycle_times: CRCycleTimes
+  status: 'GREEN' | 'YELLOW' | 'RED'
+  recommendations: string[]
+  deltas: { weighted_sp_change_pct: number; raw_sp_change_pct: number }
+  report_date: string
+}
+
+// ── Processor ─────────────────────────────────────────────────────────────────
 
 export class CodeReviewWorkflowProcessor {
   constructor(private jiraClient: JiraClient) {}
 
   /**
-   * Process a single rollback window for Code Review
+   * Fetch tickets that entered Code Review in the given window,
+   * counting how many CR passes each ticket required.
    */
-  async processRollbackWindow(window: RollbackWindow): Promise<CodeReviewMetrics> {
-    console.log(`📊 [CR] Processing rollback window: ${window.title}`)
+  private async fetchFinalTickets(days: number, priorDays: number): Promise<CRFinalTicket[]> {
+    const startDay = -(days + priorDays)
+    const endDay = -priorDays
+    const finalList = FINAL_STATUS.map(s => `"${s}"`).join(', ')
 
-    const startDay = -(window.days + window.prior_days)
-    const endDay = -window.prior_days
-    const crStatusList = CODE_REVIEW_STATUS.map(s => `"${s}"`).join(', ')
-    const finalStatusList = '"Ready for Dev", "In Progress", "Done"'
-    const pushbackStatusList = '"In Progress", "Open"'
-
-    // Fetch tickets using n8n-style structure (3 queries)
-    const [finalStatusTickets, pushbackTickets, trackedStatusTickets] = await Promise.all([
-      // 1. Final Status - tickets that completed Code Review (moved to Ready for Dev, In Progress, or Done)
-      this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED TO (${finalStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
-        ['changelog']
-      ),
-      
-      // 2. Pushback - tickets that moved FROM final status back TO In Progress/Open
-      this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED FROM (${finalStatusList}) TO (${pushbackStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
-        ['changelog']
-      ),
-      
-      // 3. Tracked Status - tickets currently IN Code Review
-      this.jiraClient.searchIssues(
-        `project in ("Playbook SaaS - Scrum", "PlayBook App") AND status CHANGED TO (${crStatusList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) AND status IN (${crStatusList}) ORDER BY updated DESC`,
-        ['changelog']
-      )
-    ])
-
-    console.log(`  ✓ [CR] Final Status: ${finalStatusTickets.length}, Pushback: ${pushbackTickets.length}, Tracked Status (WIP): ${trackedStatusTickets.length}`)
-
-    // Calculate metrics
-    const throughput = this.calculateThroughput(finalStatusTickets, window.days)
-    const code_review_in_progress = this.calculateWIP(trackedStatusTickets)
-    const cycle_time = this.calculateCycleTime(trackedStatusTickets, finalStatusTickets, pushbackTickets)
-    const quality_issues = this.calculateQualityIssues(pushbackTickets)
-
-    return {
-      rollback_window_description: window.title,
-      cycle_time,
-      throughput,
-      code_review_in_progress,
-      quality_issues
-    }
-  }
-
-  /**
-   * Calculate throughput metrics
-   */
-  private calculateThroughput(tickets: any[], windowDays: number) {
-    const reviewerMap = new Map<string, any>()
-    let totalSP = 0
-    let totalTickets = 0
-
-    for (const ticket of tickets) {
-      const sp = ticket.fields.customfield_10028 || 0
-      const reviewer = ticket.fields.assignee?.displayName || 'Unassigned'
-      
-      // Find when ticket left Code Review
-      const crExitHistory = ticket.changelog?.histories?.find((h: any) =>
-        h.items.some((item: any) =>
-          item.field === 'status' &&
-          CODE_REVIEW_STATUS.includes(item.fromString)
-        )
-      )
-
-      // Count how many times ticket returned to Code Review
-      const crReturnCount = ticket.changelog?.histories?.filter((h: any) =>
-        h.items.some((item: any) =>
-          item.field === 'status' &&
-          CODE_REVIEW_STATUS.includes(item.toString)
-        )
-      ).length || 0
-
-      const hadPreviousReturns = crReturnCount > 1
-
-      if (!reviewerMap.has(reviewer)) {
-        reviewerMap.set(reviewer, {
-          reviewer_name: reviewer,
-          unique_ticket_count: 0,
-          unique_ticket_story_points: 0,
-          tickets: []
-        })
-      }
-
-      const reviewerData = reviewerMap.get(reviewer)
-      reviewerData.unique_ticket_count++
-      reviewerData.unique_ticket_story_points += sp
-      reviewerData.tickets.push({
-        ticket_key: ticket.key,
-        story_points: sp,
-        history_created: crExitHistory?.created || ticket.fields.statuscategorychangedate,
-        had_previous_returns: hadPreviousReturns,
-        cr_return_cycles_count: crReturnCount
-      })
-
-      totalSP += sp
-      totalTickets++
-    }
-
-    return {
-      total_story_points: totalSP,
-      total_tickets: totalTickets,
-      pace_sp_per_bd: windowDays > 0 ? Number((totalSP / windowDays).toFixed(1)) : 0,
-      per_reviewer_throughput: Array.from(reviewerMap.values())
-    }
-  }
-
-  /**
-   * Calculate WIP metrics
-   */
-  private calculateWIP(tickets: any[]) {
-    const reviewerMap = new Map<string, any>()
-    let totalSP = 0
-    let totalTickets = tickets.length
-
-    for (const ticket of tickets) {
-      const sp = ticket.fields.customfield_10028 || 0
-      const reviewer = ticket.fields.assignee?.displayName || 'Unassigned'
-
-      if (!reviewerMap.has(reviewer)) {
-        reviewerMap.set(reviewer, {
-          reviewer_assignee: reviewer,
-          cr_tickets_wip_count: 0,
-          cr_tickets_wip_story_points_total: 0
-        })
-      }
-
-      const reviewerData = reviewerMap.get(reviewer)
-      reviewerData.cr_tickets_wip_count++
-      reviewerData.cr_tickets_wip_story_points_total += sp
-
-      totalSP += sp
-    }
-
-    return {
-      total_tickets: totalTickets,
-      total_story_points: totalSP,
-      per_reviewer_cr_in_progress: Array.from(reviewerMap.values())
-    }
-  }
-
-  /**
-   * Calculate cycle time metrics
-   */
-  private calculateCycleTime(wipTickets: any[], doneTickets: any[], pushbackTickets: any[]) {
-    let toCodeReviewTotal = 0
-    let toCodeReviewCount = 0
-    let toReadyForDevTotal = 0
-    let toReadyForDevCount = 0
-    let toPushbackTotal = 0
-    let toPushbackCount = 0
-
-    // Calculate time to Code Review from WIP tickets
-    for (const ticket of wipTickets) {
-      const crEntry = ticket.changelog?.histories?.find((h: any) =>
-        h.items.some((item: any) =>
-          item.field === 'status' &&
-          CODE_REVIEW_STATUS.includes(item.toString)
-        )
-      )
-      
-      if (crEntry) {
-        const created = new Date(ticket.fields.created)
-        const crDate = new Date(crEntry.created)
-        const daysDiff = Math.ceil((crDate.getTime() - created.getTime()) / (1000 * 60 * 60 * 24))
-        toCodeReviewTotal += daysDiff
-        toCodeReviewCount++
-      }
-    }
-
-    // Calculate time to Ready for Dev from done tickets
-    for (const ticket of doneTickets) {
-      const created = new Date(ticket.fields.created)
-      const doneDate = new Date(ticket.fields.statuscategorychangedate || ticket.fields.updated)
-      const daysDiff = Math.ceil((doneDate.getTime() - created.getTime()) / (1000 * 60 * 60 * 24))
-      toReadyForDevTotal += daysDiff
-      toReadyForDevCount++
-    }
-
-    // Calculate pushback cycle time
-    for (const ticket of pushbackTickets) {
-      const pushbackHistory = ticket.changelog?.histories?.find((h: any) =>
-        h.items.some((item: any) =>
-          item.field === 'status' &&
-          item.toString === 'In Progress'
-        )
-      )
-      
-      if (pushbackHistory) {
-        const created = new Date(ticket.fields.created)
-        const pushbackDate = new Date(pushbackHistory.created)
-        const daysDiff = Math.ceil((pushbackDate.getTime() - created.getTime()) / (1000 * 60 * 60 * 24))
-        toPushbackTotal += daysDiff
-        toPushbackCount++
-      }
-    }
-
-    return {
-      to_code_review_avg_bd: toCodeReviewCount > 0 ? Number((toCodeReviewTotal / toCodeReviewCount).toFixed(1)) : 0,
-      to_ready_for_dev_avg_bd: toReadyForDevCount > 0 ? Number((toReadyForDevTotal / toReadyForDevCount).toFixed(1)) : 0,
-      to_pushback_avg_bd: toPushbackCount > 0 ? Number((toPushbackTotal / toPushbackCount).toFixed(1)) : 0
-    }
-  }
-
-  /**
-   * Calculate quality issues (critical blockers)
-   */
-  private calculateQualityIssues(pushbackTickets: any[]) {
-    const criticalBlockers = pushbackTickets.filter(t => 
-      t.fields.priority?.name === 'Highest' || t.fields.priority?.name === 'High'
+    const tickets = await this.jiraClient.searchIssues(
+      `project in (${PROJECTS}) AND status CHANGED TO (${finalList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
+      ['changelog'],
+      { fields: 'customfield_10028,created,status,creator,summary' }
     )
 
-    const unresolved = criticalBlockers.filter(t => t.fields.status.name !== 'Done')
-    const resolved = criticalBlockers.filter(t => t.fields.status.name === 'Done')
+    const finalSet = new Set(FINAL_STATUS)
+    const pushbackSet = new Set(PUSHBACK_STATUS)
 
-    return {
-      critical_blockers_count: pushbackTickets.length,
-      critical_blockers: {
-        total_count: criticalBlockers.length,
-        unresolved_count: unresolved.length,
-        resolved_count: resolved.length,
-        old_unresolved: unresolved.map(t => ({
-          key: t.key,
-          summary: t.fields.summary,
-          status: t.fields.status.name,
-          priority: t.fields.priority?.name || 'None',
-          age_bd: Math.ceil((Date.now() - new Date(t.fields.created).getTime()) / (1000 * 60 * 60 * 24))
-        }))
+    return tickets.map((ticket: any) => {
+      let trackedPassCount = 1
+
+      const histories = [...(ticket.changelog?.histories ?? [])].sort(
+        (a: any, b: any) => new Date(a.created).getTime() - new Date(b.created).getTime()
+      )
+
+      for (const history of histories) {
+        for (const item of [...(history.items ?? [])].reverse()) {
+          if (item.field !== 'status') continue
+          // CR → In Progress = pushback = counts as another pass
+          if (finalSet.has(item.fromString) && pushbackSet.has(item.toString)) {
+            trackedPassCount++
+          }
+        }
       }
-    }
+
+      const spRaw = ticket.fields?.customfield_10028
+      return {
+        key: ticket.key,
+        creator: ticket.fields?.creator?.displayName ?? 'Unknown',
+        tracked_pass_count: trackedPassCount,
+        story_points: typeof spRaw === 'number' ? spRaw : null,
+      }
+    })
   }
 
   /**
-   * Process all rollback windows
+   * Fetch tickets that were pushed back from Code Review to In Progress
+   * in the given window, building a full pushback history per ticket.
    */
-  async processAllWindows(): Promise<Record<string, CodeReviewMetrics>> {
-    const results: Record<string, CodeReviewMetrics> = {}
+  private async fetchPushbackTickets(days: number, priorDays: number): Promise<CRPushbackTicket[]> {
+    const startDay = -(days + priorDays)
+    const endDay = -priorDays
+    const finalList = FINAL_STATUS.map(s => `"${s}"`).join(', ')
+    const pushbackList = PUSHBACK_STATUS.map(s => `"${s}"`).join(', ')
 
-    for (const window of ROLLBACK_WINDOWS) {
-      results[window.key] = await this.processRollbackWindow(window)
+    const tickets = await this.jiraClient.searchIssues(
+      `project in (${PROJECTS}) AND status CHANGED FROM (${finalList}) TO (${pushbackList}) AFTER startOfDay(${startDay}) BEFORE endOfDay(${endDay}) ORDER BY updated DESC`,
+      ['changelog']
+    )
+
+    const finalSet = new Set(FINAL_STATUS)
+    const pushbackSet = new Set(PUSHBACK_STATUS)
+
+    return tickets.map((ticket: any) => {
+      const pushbackHistory: CRPushbackEntry[] = []
+      let crPassCount = 1
+      let currentCRActivity: { stage: string; timestamp: string } | null = null
+
+      const histories = [...(ticket.changelog?.histories ?? [])].sort(
+        (a: any, b: any) => new Date(a.created).getTime() - new Date(b.created).getTime()
+      )
+
+      for (const history of histories) {
+        for (const item of [...(history.items ?? [])].reverse()) {
+          if (item.field !== 'status') continue
+
+          // Track last time ticket entered CR
+          if (finalSet.has(item.toString)) {
+            if (!currentCRActivity || new Date(history.created) > new Date(currentCRActivity.timestamp)) {
+              currentCRActivity = { stage: item.toString, timestamp: history.created }
+            }
+          }
+
+          // CR → In Progress = pushback event
+          if (finalSet.has(item.fromString) && pushbackSet.has(item.toString)) {
+            pushbackHistory.push({
+              assignee: history.author?.displayName ?? 'Unknown',
+              cr_pass_number: crPassCount,
+              cr_activity: currentCRActivity,
+              pushback_activity: { status: item.toString, timestamp: history.created },
+            })
+            currentCRActivity = null
+            crPassCount++
+          }
+        }
+      }
+
+      return { key: ticket.key, cr_pass_count: crPassCount, pushback_history: pushbackHistory }
+    })
+  }
+
+  private computeWindowMetrics(tickets: CRFinalTicket[]): CRWindowMetrics {
+    let weightedSP = 0
+    let rawSP = 0
+    let missingSP = 0
+    let firstPassSP = 0
+    let repeatPassSP = 0
+    const passes = { p1: 0, p2: 0, p3: 0, p4plus: 0 }
+
+    for (const t of tickets) {
+      const attempts = t.tracked_pass_count || 1
+      if (attempts === 1) passes.p1++
+      else if (attempts === 2) passes.p2++
+      else if (attempts === 3) passes.p3++
+      else passes.p4plus++
+
+      if (t.story_points === null || t.story_points === undefined) {
+        missingSP++
+      } else {
+        rawSP += t.story_points
+        if (attempts === 1) {
+          weightedSP += t.story_points * 1.0
+          firstPassSP += t.story_points
+        } else {
+          if (attempts === 2) weightedSP += t.story_points * 0.33
+          else if (attempts === 3) weightedSP += t.story_points * 0.25
+          // 4+ passes = 0 weight
+          repeatPassSP += t.story_points
+        }
+      }
     }
 
-    return results
+    return {
+      total_tickets: tickets.length,
+      raw_story_points: rawSP,
+      weighted_story_points: parseFloat(weightedSP.toFixed(2)),
+      missing_story_points: missingSP,
+      first_pass_sp: firstPassSP,
+      repeat_pass_sp: repeatPassSP,
+      pass_distribution: passes,
+    }
+  }
+
+  private computeOwners(tickets: CRFinalTicket[]): CROwner[] {
+    const ownerMap = new Map<string, CRFinalTicket[]>()
+    for (const t of tickets) {
+      if (!ownerMap.has(t.creator)) ownerMap.set(t.creator, [])
+      ownerMap.get(t.creator)!.push(t)
+    }
+
+    const owners: CROwner[] = []
+    for (const [owner, ownerTickets] of ownerMap) {
+      let rawSP = 0, weightedSP = 0, missingSP = 0
+      let firstPassCount = 0, repeatPassCount = 0
+      const keys: string[] = []
+      const tickets: CROwnerTicket[] = []
+
+        let firstPassSP = 0, repeatPassSP = 0
+
+      for (const t of ownerTickets) {
+        keys.push(t.key)
+        tickets.push({ key: t.key, story_points: t.story_points, tracked_pass_count: t.tracked_pass_count })
+        const attempts = t.tracked_pass_count || 1
+        if (attempts === 1) firstPassCount++
+        else repeatPassCount++
+
+        if (t.story_points === null || t.story_points === undefined) {
+          missingSP++
+        } else {
+          rawSP += t.story_points
+          if (attempts === 1) {
+            weightedSP += t.story_points * 1.0
+            firstPassSP += t.story_points
+          } else {
+            if (attempts === 2) weightedSP += t.story_points * 0.33
+            else if (attempts === 3) weightedSP += t.story_points * 0.25
+            repeatPassSP += t.story_points
+          }
+        }
+      }
+
+      owners.push({
+        owner,
+        ticket_count: ownerTickets.length,
+        ticket_keys: keys.join(', '),
+        tickets,
+        raw_sp: rawSP,
+        weighted_sp: parseFloat(weightedSP.toFixed(2)),
+        missing_sp: missingSP,
+        first_pass_count: firstPassCount,
+        repeat_pass_count: repeatPassCount,
+        first_pass_sp: firstPassSP,
+        repeat_pass_sp: repeatPassSP,
+      })
+    }
+
+    return owners.sort((a, b) => b.weighted_sp - a.weighted_sp)
+  }
+
+  /**
+   * Compute average cycle time (calendar days) that tickets spent in Code Review
+   * before being pushed back. Uses pushback history timestamps.
+   */
+  private computeRAgeCycle(exclusions: CRPushbackTicket[]): number {
+    const durations: number[] = []
+    for (const ex of exclusions) {
+      for (const entry of ex.pushback_history) {
+        if (entry.cr_activity?.timestamp && entry.pushback_activity?.timestamp) {
+          const crEntry  = new Date(entry.cr_activity.timestamp).getTime()
+          const pushback = new Date(entry.pushback_activity.timestamp).getTime()
+          const days = (pushback - crEntry) / (1000 * 60 * 60 * 24)
+          if (days >= 0) durations.push(days)
+        }
+      }
+    }
+    if (durations.length === 0) return 0
+    const avg = durations.reduce((s, d) => s + d, 0) / durations.length
+    return parseFloat(avg.toFixed(1))
+  }
+
+  private computeStatus(w7: CRWindowMetrics, priorW7: CRWindowMetrics): { status: 'GREEN' | 'YELLOW' | 'RED'; recommendations: string[] } {
+    let status: 'GREEN' | 'YELLOW' | 'RED' = 'GREEN'
+    const recommendations: string[] = []
+    const { pass_distribution: p, total_tickets } = w7
+
+    if (p.p3 + p.p4plus > total_tickets * 0.30) {
+      status = 'RED'
+      recommendations.push('High 3rd+ pass rate detected; investigate recurring defects or unclear requirements.')
+    }
+
+    if (priorW7.weighted_story_points > 0 && w7.weighted_story_points < priorW7.weighted_story_points * 0.6) {
+      status = 'RED'
+      recommendations.push('Weighted story point output dropped significantly vs prior window.')
+    }
+
+    if (status !== 'RED') {
+      if (p.p2 > total_tickets * 0.40) {
+        status = 'YELLOW'
+        recommendations.push('High second-pass rate; CR pushbacks increasing.')
+      }
+      if (w7.missing_story_points > total_tickets * 0.20) {
+        status = 'YELLOW'
+        recommendations.push('Large number of tickets missing story points.')
+      }
+      if (priorW7.weighted_story_points > 0) {
+        const pctChange = ((w7.weighted_story_points - priorW7.weighted_story_points) / priorW7.weighted_story_points) * 100
+        if (pctChange < -20) {
+          status = 'YELLOW'
+          recommendations.push('Weighted story points decreased more than 20% compared to prior window.')
+        }
+      }
+    }
+
+    if (recommendations.length === 0) recommendations.push('No immediate issues detected.')
+    return { status, recommendations }
+  }
+
+  /**
+   * Fetch and compute all CR metrics.
+   * Windows: w7 (last 7d), prior_w7 (7–14d ago), w28 (last 28d), exclusions (28d pushbacks).
+   */
+  async processAll(): Promise<CRData> {
+    const [w7Tickets, priorW7Tickets, w28Tickets, exclusions] = await Promise.all([
+      this.fetchFinalTickets(7, 0),
+      this.fetchFinalTickets(7, 7),
+      this.fetchFinalTickets(28, 0),
+      this.fetchPushbackTickets(28, 0),
+    ])
+
+    const w7     = this.computeWindowMetrics(w7Tickets)
+    const priorW7 = this.computeWindowMetrics(priorW7Tickets)
+    const w28    = this.computeWindowMetrics(w28Tickets)
+    const { status, recommendations } = this.computeStatus(w7, priorW7)
+    const owners       = this.computeOwners(w7Tickets)
+    const priorW7Owners = this.computeOwners(priorW7Tickets)
+    const monthlyOwners = this.computeOwners(w28Tickets)
+
+    // rAgeCycle: compute separately for w7-window pushbacks and full w28 pushbacks
+    const w7PushbackCutoff = Date.now() - 7 * 24 * 60 * 60 * 1000
+    const w7Exclusions = exclusions.map(ex => ({
+      ...ex,
+      pushback_history: ex.pushback_history.filter(
+        e => new Date(e.pushback_activity.timestamp).getTime() >= w7PushbackCutoff
+      ),
+    })).filter(ex => ex.pushback_history.length > 0)
+
+    const cycleTimes: CRCycleTimes = {
+      r_age_cycle_w7: this.computeRAgeCycle(w7Exclusions),
+      r_age_cycle_w28: this.computeRAgeCycle(exclusions),
+    }
+
+    const pctChange = (cur: number, prior: number) =>
+      prior === 0
+        ? cur === 0 ? 0 : 100
+        : parseFloat((((cur - prior) / prior) * 100).toFixed(2))
+
+    return {
+      w7,
+      prior_w7: priorW7,
+      w28,
+      owners,
+      prior_w7_owners: priorW7Owners,
+      monthly_owners: monthlyOwners,
+      exclusions,
+      cycle_times: cycleTimes,
+      status,
+      recommendations,
+      deltas: {
+        weighted_sp_change_pct: pctChange(w7.weighted_story_points, priorW7.weighted_story_points),
+        raw_sp_change_pct: pctChange(w7.raw_story_points, priorW7.raw_story_points),
+      },
+      report_date: new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }),
+    }
   }
 }

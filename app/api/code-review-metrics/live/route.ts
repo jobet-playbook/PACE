@@ -1,239 +1,79 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 import { createJiraClient } from '@/lib/jira-client'
 import { CodeReviewWorkflowProcessor } from '@/lib/code-review-workflow'
-import { cachePool, CacheKeys } from '@/lib/cache-pool'
+import { readCRFromNormalizedTables, writeCRToNormalizedTables } from '@/lib/cr-metrics-db'
+import { cachePool } from '@/lib/cache-pool'
+
+const CACHE_KEY = 'code-review-metrics:live'
 
 /**
- * API endpoint to fetch and process live Code Review metrics from Jira
- * Uses multi-layer cache pool to combat rate limiting and improve performance
+ * GET /api/code-review-metrics/live
+ *
+ * Data flow (cron → Supabase → website):
+ *   1. Memory cache (5 min TTL)   — fastest, avoids DB on every render
+ *   2. Supabase pace_cr_snapshots — written by the daily cron, < 23 h old
+ *   3. Live Jira API              — fallback on first load before first sync,
+ *                                   writes result to Supabase for next request
  */
-export async function GET(request: NextRequest) {
-  const cacheKey = 'code-review-metrics:live'
-  
+export async function GET(_request: NextRequest) {
   try {
-    console.log('🔄 [CR Live] Fetching Code Review metrics...')
-
-    // 1. Try to get from cache pool (memory + Supabase)
-    const cachedData = await cachePool.get(cacheKey)
-    if (cachedData) {
-      return NextResponse.json({
-        ...cachedData,
-        _cached: true,
-        _source: 'cache_pool'
-      })
+    // ── 1. Memory cache ──────────────────────────────────────────────────────
+    const cached = await cachePool.get(CACHE_KEY)
+    if (cached) {
+      return NextResponse.json({ ...cached, _cached: true, _source: 'memory_cache' })
     }
 
-    console.log('📊 [CR Live] Cache miss, fetching from Jira...')
+    // ── 2. Supabase normalized tables ────────────────────────────────────────
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-    // Check if Jira credentials are configured
-    const jiraBaseUrl = process.env.JIRA_BASE_URL
-    const jiraEmail = process.env.JIRA_EMAIL
+    if (supabaseUrl && supabaseKey) {
+      const supabase = createClient(supabaseUrl, supabaseKey)
+      const dbData = await readCRFromNormalizedTables(supabase)
+      if (dbData) {
+        await cachePool.set(CACHE_KEY, dbData)
+        return NextResponse.json({ ...dbData, _cached: false, _source: 'supabase' })
+      }
+    }
+
+    // ── 3. Live Jira (fallback / first-load before first sync) ───────────────
     const jiraToken = process.env.JIRA_API_TOKEN
+    if (!process.env.JIRA_BASE_URL || !process.env.JIRA_EMAIL || !jiraToken || jiraToken.includes('BLANK_VALUE')) {
+      return NextResponse.json({ error: 'Jira credentials not configured' }, { status: 500 })
+    }
 
-    if (!jiraBaseUrl || !jiraEmail || !jiraToken || jiraToken.includes('BLANK_VALUE')) {
-      console.error('❌ [CR Live] Jira credentials not configured')
-      return NextResponse.json(
-        { 
-          error: 'Jira credentials not configured',
-          message: 'Please configure JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN in your environment variables'
-        },
-        { status: 500 }
+    console.log('📊 [CR Live] No cached data — fetching from Jira...')
+    const jiraClient = createJiraClient()
+    const processor  = new CodeReviewWorkflowProcessor(jiraClient)
+    const data       = await processor.processAll()
+
+    // Persist to Supabase so next request hits the DB path
+    if (supabaseUrl && supabaseKey) {
+      const supabase = createClient(supabaseUrl, supabaseKey)
+      writeCRToNormalizedTables(supabase, data).catch(e =>
+        console.error('⚠️ [CR Live] Supabase write failed:', e)
       )
     }
 
-    // Initialize processor
-    const jiraClient = createJiraClient()
-    const processor = new CodeReviewWorkflowProcessor(jiraClient)
-
-    // Process all rollback windows
-    console.log('📊 [CR Live] Processing rollback windows...')
-    const rollback_windows = await processor.processAllWindows()
-
-    // Build response
-    const response = {
-      output: {
-        report_meta: {
-          generated_at_et: new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }),
-          report_type: 'Daily Code Review Performance Report',
-          today_label: new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' }),
-          last_business_day_label: getLastBusinessDay().toLocaleDateString('en-US', { timeZone: 'America/New_York' })
-        },
-        people: buildPeopleData(rollback_windows.w7)
-      },
-      rollback_windows,
-      last_30_business_days: {
-        total_tickets: rollback_windows.w28.throughput.total_tickets,
-        story_points: rollback_windows.w28.throughput.total_story_points,
-        first_pass: {
-          ticket_count: rollback_windows.w28.throughput.per_reviewer_throughput.reduce((sum, r) => 
-            sum + r.tickets.filter(t => !t.had_previous_returns).length, 0
-          ),
-          story_points: rollback_windows.w28.throughput.per_reviewer_throughput.reduce((sum, r) => 
-            sum + r.tickets.filter(t => !t.had_previous_returns).reduce((s, t) => s + t.story_points, 0), 0
-          )
-        },
-        repeat_pass: {
-          ticket_count: rollback_windows.w28.throughput.per_reviewer_throughput.reduce((sum, r) => 
-            sum + r.tickets.filter(t => t.had_previous_returns).length, 0
-          ),
-          story_points: rollback_windows.w28.throughput.per_reviewer_throughput.reduce((sum, r) => 
-            sum + r.tickets.filter(t => t.had_previous_returns).reduce((s, t) => s + t.story_points, 0), 0
-          )
-        },
-        reviewers: rollback_windows.w28.throughput.per_reviewer_throughput.map((r: any) => ({
-          reviewer_name: r.reviewer_name,
-          handled_ticket_count: r.unique_ticket_count,
-          handled_ticket_story_points: r.unique_ticket_story_points
-        }))
-      },
-      critical_blockers: rollback_windows.w7.quality_issues.critical_blockers.old_unresolved || []
-    }
-
-    // 2. Store in cache pool for future requests
-    await cachePool.set(cacheKey, response)
-    console.log('💾 [CR Live] Data cached successfully')
-
-    return NextResponse.json({
-      ...response,
-      _cached: false,
-      _source: 'jira_api'
-    })
+    await cachePool.set(CACHE_KEY, data)
+    return NextResponse.json({ ...data, _cached: false, _source: 'jira_api' })
 
   } catch (error) {
-    console.error('❌ [CR Live] Error fetching live data:', error)
-    
-    // 3. On error, try to return stale cache (up to 24 hours old)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    const isRateLimitError = errorMessage.includes('429') || errorMessage.includes('rate limit')
-    
-    if (isRateLimitError) {
-      console.log('⚠️ [CR Live] Rate limit detected, attempting stale cache fallback...')
-      const staleData = await cachePool.getStale(cacheKey)
-      
-      if (staleData) {
-        return NextResponse.json({
-          ...staleData,
-          _cached: true,
-          _stale: true,
-          _rateLimited: true,
-          _source: 'stale_cache'
-        })
+    console.error('❌ [CR Live] Error:', error)
+    const message = error instanceof Error ? error.message : 'Unknown error'
+    const isRateLimit = message.includes('429') || message.toLowerCase().includes('rate limit')
+
+    if (isRateLimit) {
+      const stale = await cachePool.getStale(CACHE_KEY)
+      if (stale) {
+        return NextResponse.json({ ...stale, _cached: true, _stale: true, _source: 'stale_cache' })
       }
     }
-    
+
     return NextResponse.json(
-      { 
-        error: 'Failed to fetch live Code Review metrics from Jira',
-        details: errorMessage,
-        suggestion: 'Please try again in a few minutes or contact support if the issue persists'
-      },
+      { error: 'Failed to fetch Code Review metrics', details: message },
       { status: 500 }
     )
   }
-}
-
-/**
- * Build people data from rollback window
- */
-function buildPeopleData(windowData: any) {
-  const reviewers = new Map<string, any>()
-
-  for (const reviewer of windowData.throughput.per_reviewer_throughput) {
-    const firstPassTickets = reviewer.tickets.filter((t: any) => !t.had_previous_returns)
-    const repeatPassTickets = reviewer.tickets.filter((t: any) => t.had_previous_returns)
-    const repeatPercentage = reviewer.unique_ticket_count > 0 
-      ? Math.round((repeatPassTickets.length / reviewer.unique_ticket_count) * 100) 
-      : 0
-
-    reviewers.set(reviewer.reviewer_name, {
-      reviewer_name: reviewer.reviewer_name,
-      today_stats: {
-        ticket_count: reviewer.unique_ticket_count,
-        story_points: reviewer.unique_ticket_story_points,
-        first_time_count: firstPassTickets.length,
-        repeat_count: repeatPassTickets.length,
-        repeat_percentage: repeatPercentage
-      },
-      today_tickets: reviewer.tickets.map((ticket: any) => {
-        const completionTime = ticket.history_created 
-          ? new Date(ticket.history_created).toLocaleTimeString('en-US', { 
-              timeZone: 'America/New_York',
-              hour: 'numeric',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: true
-            }) + ' ET'
-          : new Date().toLocaleTimeString('en-US', { 
-              timeZone: 'America/New_York',
-              hour: 'numeric',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: true
-            }) + ' ET'
-
-        return {
-          ticket_id: ticket.ticket_key,
-          completed_time_et: completionTime,
-          story_points: ticket.story_points,
-          pass_type: ticket.had_previous_returns ? 'repeat_pass' : 'first_time_pass',
-          cr_return_cycles_count: ticket.cr_return_cycles_count || 0,
-          had_previous_returns: ticket.had_previous_returns || false,
-          recap: `${ticket.ticket_key} completed Code Review (${ticket.story_points || 0} pt${ticket.story_points === 1 ? '' : 's'}, ${ticket.had_previous_returns ? 'repeat' : 'first-time'} pass).`
-        }
-      }),
-      last_business_day_stats: {
-        ticket_count: 0,
-        story_points: 0,
-        first_time_count: 0,
-        repeat_count: 0,
-        repeat_percentage: 0
-      },
-      last_business_day_tickets: []
-    })
-  }
-
-  // Add reviewers with WIP but no completions
-  for (const reviewer of windowData.code_review_in_progress.per_reviewer_cr_in_progress) {
-    if (!reviewers.has(reviewer.reviewer_assignee)) {
-      reviewers.set(reviewer.reviewer_assignee, {
-        reviewer_name: reviewer.reviewer_assignee,
-        today_stats: {
-          ticket_count: 0,
-          story_points: 0,
-          first_time_count: 0,
-          repeat_count: 0,
-          repeat_percentage: 0
-        },
-        today_tickets: [],
-        last_business_day_stats: {
-          ticket_count: 0,
-          story_points: 0,
-          first_time_count: 0,
-          repeat_count: 0,
-          repeat_percentage: 0
-        },
-        last_business_day_tickets: []
-      })
-    }
-
-    const reviewerData = reviewers.get(reviewer.reviewer_assignee)
-    reviewerData.wip_count = reviewer.cr_tickets_wip_count
-    reviewerData.wip_story_points = reviewer.cr_tickets_wip_story_points_total
-  }
-
-  return Array.from(reviewers.values())
-}
-
-function getLastBusinessDay(): Date {
-  const date = new Date()
-  let daysToSubtract = 1
-
-  if (date.getDay() === 1) {
-    daysToSubtract = 3
-  } else if (date.getDay() === 0) {
-    daysToSubtract = 2
-  }
-
-  date.setDate(date.getDate() - daysToSubtract)
-  return date
 }

@@ -3,6 +3,10 @@
     {
       "path": "/api/qa-metrics/sync",
       "schedule": "0 11 * * 1-5"
+    },
+    {
+      "path": "/api/code-review-metrics/sync",
+      "schedule": "0 11 * * 1-5"
     }
   ]
 }

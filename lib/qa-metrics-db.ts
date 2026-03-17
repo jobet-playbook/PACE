@@ -102,25 +102,27 @@ export async function writeToNormalizedTables(
   }
   const reportId: string = report.id
 
-  // ── 4. Upsert daily member stats ─────────────────────────────────────────
+  // ── 4. Delete + insert daily member stats (avoids upsert constraint issues) ──
+  await supabase.from('pace_qa_daily_member_stats').delete().eq('report_id', reportId)
+
+  const memberStats: any[] = []
   for (const person of output.people ?? []) {
     const memberId = memberIds.get(person.qa_assignee)
     if (!memberId) continue
-
-    const { error } = await supabase.from('pace_qa_daily_member_stats').upsert(
-      {
-        report_id: reportId,
-        member_id: memberId,
-        report_date: today,
-        tickets_completed: person.today_stats?.ticket_count ?? 0,
-        story_points_completed: person.today_stats?.story_points ?? 0,
-        first_time_pass_count: person.today_stats?.first_time_count ?? 0,
-        repeat_pass_count: person.today_stats?.repeat_count ?? 0,
-        repeat_percentage: person.today_stats?.repeat_percentage ?? 0,
-      },
-      { onConflict: 'report_id,member_id' }
-    )
-    if (error) console.error(`⚠️ [DB] member_stats upsert "${person.qa_assignee}":`, error.message)
+    memberStats.push({
+      report_id: reportId,
+      member_id: memberId,
+      report_date: today,
+      tickets_completed: person.today_stats?.ticket_count ?? 0,
+      story_points_completed: person.today_stats?.story_points ?? 0,
+      first_time_pass_count: person.today_stats?.first_time_count ?? 0,
+      repeat_pass_count: person.today_stats?.repeat_count ?? 0,
+      repeat_percentage: person.today_stats?.repeat_percentage ?? 0,
+    })
+  }
+  if (memberStats.length > 0) {
+    const { error } = await supabase.from('pace_qa_daily_member_stats').insert(memberStats)
+    if (error) console.error('⚠️ [DB] member_stats insert:', error.message)
   }
 
   // ── 5. Delete + insert ticket completions for this report ────────────────
@@ -327,33 +329,69 @@ export async function readFromNormalizedTables(supabase: SupabaseClient): Promis
   const wipTickets: any[] = wipTicketsRes.data ?? []
   const summary: any = summaryRes.data
 
-  // ── Build people (from member stats + ticket completions) ────────────────
-  const people = memberStats.map(ms => {
-    const memberCompletions = completions.filter(c => c.member_id === ms.member_id)
+  // ── Build people (stats from daily_member_stats, tickets from w1/prior_w1 windows) ──
+  // Build lookup maps from w1 and prior_w1 stored in rollback_windows rows
+  const w1Row = rollbackWindows.find((w: any) => w.window_type === 'w1')
+  const priorW1Row = rollbackWindows.find((w: any) => w.window_type === 'prior_w1')
+  const w1Members: any[] = w1Row?.per_member_throughput ?? []
+  const priorW1Members: any[] = priorW1Row?.per_member_throughput ?? []
+
+  const mapStoredTicket = (ticket: any) => {
+    const completionTime = ticket.history_created
+      ? new Date(ticket.history_created).toLocaleTimeString('en-US', {
+          timeZone: 'America/New_York',
+          hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+        }) + ' ET'
+      : ''
     return {
-      qa_assignee: ms.member?.name ?? '',
-      today_stats: {
-        ticket_count: ms.tickets_completed,
-        story_points: ms.story_points_completed,
-        first_time_count: ms.first_time_pass_count,
-        repeat_count: ms.repeat_pass_count,
-        repeat_percentage: ms.repeat_percentage,
-      },
-      today_tickets: memberCompletions.map((c: any) => ({
-        ticket_id: c.ticket?.ticket_key ?? '',
-        completed_time_et: c.completion_time,
-        story_points: c.story_points,
-        handled_stage: c.handled_stage,
-        new_stage: c.new_stage,
-        pass_type: c.pass_type,
-        qa_return_cycles_count: c.qa_return_cycles_count,
-        had_previous_returns: c.had_previous_returns,
-        recap: c.recap,
-      })),
-      last_business_day_stats: {
-        ticket_count: 0, story_points: 0, first_time_count: 0, repeat_count: 0, repeat_percentage: 0,
-      },
-      last_business_day_tickets: [],
+      ticket_id: ticket.ticket_key,
+      completed_time_et: completionTime,
+      story_points: ticket.story_points,
+      handled_stage: ticket.handled_stage,
+      new_stage: 'Done',
+      pass_type: ticket.had_previous_returns ? 'repeat_pass' : 'first_time_pass',
+      qa_return_cycles_count: ticket.qa_return_cycles_count ?? 0,
+      had_previous_returns: ticket.had_previous_returns ?? false,
+      recap: `${ticket.ticket_key} completed QA (${ticket.story_points ?? 0} pt${ticket.story_points === 1 ? '' : 's'}, ${ticket.had_previous_returns ? 'repeat' : 'first-time'} pass) moving from ${ticket.handled_stage} to Done.`,
+    }
+  }
+
+  const buildStatsFromMembers = (members: any[], name: string) => {
+    const member = members.find((m: any) => m.qa_name === name)
+    if (!member) return { ticket_count: 0, story_points: 0, first_time_count: 0, repeat_count: 0, repeat_percentage: 0 }
+    const seen = new Set<string>()
+    const unique = (member.tickets ?? []).filter((t: any) => {
+      if (seen.has(t.ticket_key)) return false
+      seen.add(t.ticket_key)
+      return true
+    })
+    const fp = unique.filter((t: any) => !t.had_previous_returns)
+    const rp = unique.filter((t: any) => t.had_previous_returns)
+    const sp = unique.reduce((s: number, t: any) => s + (t.story_points ?? 0), 0)
+    return {
+      ticket_count: unique.length,
+      story_points: sp,
+      first_time_count: fp.length,
+      repeat_count: rp.length,
+      repeat_percentage: unique.length > 0 ? Math.round((rp.length / unique.length) * 100) : 0,
+    }
+  }
+
+  // Collect all names from both w1 and prior_w1 windows
+  const allNames = new Set<string>()
+  for (const ms of memberStats) if (ms.member?.name) allNames.add(ms.member.name)
+  for (const m of w1Members) if (m.qa_name) allNames.add(m.qa_name)
+  for (const m of priorW1Members) if (m.qa_name) allNames.add(m.qa_name)
+
+  const people = Array.from(allNames).map(name => {
+    const w1Member = w1Members.find((m: any) => m.qa_name === name)
+    const priorMember = priorW1Members.find((m: any) => m.qa_name === name)
+    return {
+      qa_assignee: name,
+      today_stats: buildStatsFromMembers(w1Members, name),
+      today_tickets: (w1Member?.tickets ?? []).map(mapStoredTicket),
+      last_business_day_stats: buildStatsFromMembers(priorW1Members, name),
+      last_business_day_tickets: (priorMember?.tickets ?? []).map(mapStoredTicket),
     }
   })
 

@@ -114,7 +114,7 @@ export async function GET(_request: NextRequest) {
           today_label: new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' }),
           last_business_day_label: getLastBusinessDay().toLocaleDateString('en-US', { timeZone: 'America/New_York' }),
         },
-        people: buildPeopleData(rollback_windows.w7),
+        people: buildPeopleData(rollback_windows.w1, rollback_windows.prior_w1),
       },
       rollback_windows,
       last_30_business_days,
@@ -157,55 +157,66 @@ export async function GET(_request: NextRequest) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function buildPeopleData(windowData: any) {
+function buildPeopleData(w1Data: any, priorW1Data: any) {
   const qaMembers = new Map<string, any>()
 
-  for (const member of windowData?.throughput?.per_qa_member_throughput ?? []) {
-    if (qaMembers.has(member.qa_name)) continue
+  const mapTicket = (ticket: any) => {
+    const completionTime = ticket.history_created
+      ? new Date(ticket.history_created).toLocaleTimeString('en-US', {
+          timeZone: 'America/New_York',
+          hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+        }) + ' ET'
+      : ''
+    return {
+      ticket_id: ticket.ticket_key,
+      completed_time_et: completionTime,
+      story_points: ticket.story_points,
+      handled_stage: ticket.handled_stage,
+      new_stage: 'Done',
+      pass_type: ticket.had_previous_returns ? 'repeat_pass' : 'first_time_pass',
+      qa_return_cycles_count: ticket.qa_return_cycles_count ?? 0,
+      had_previous_returns: ticket.had_previous_returns ?? false,
+      recap: `${ticket.ticket_key} completed QA (${ticket.story_points ?? 0} pt${ticket.story_points === 1 ? '' : 's'}, ${ticket.had_previous_returns ? 'repeat' : 'first-time'} pass) moving from ${ticket.handled_stage} to Done.`,
+    }
+  }
 
-    const firstPassTickets  = (member.tickets ?? []).filter((t: any) => !t.had_previous_returns)
-    const repeatPassTickets = (member.tickets ?? []).filter((t: any) => t.had_previous_returns)
-    const repeatPercentage  =
-      member.unique_ticket_count > 0
-        ? Math.round((repeatPassTickets.length / member.unique_ticket_count) * 100)
-        : 0
+  const buildStats = (members: any[], targetName: string) => {
+    const member = members.find((m: any) => m.qa_name === targetName)
+    if (!member) return { ticket_count: 0, story_points: 0, first_time_count: 0, repeat_count: 0, repeat_percentage: 0 }
+    const seen = new Set<string>()
+    const unique = (member.tickets ?? []).filter((t: any) => {
+      if (seen.has(t.ticket_key)) return false
+      seen.add(t.ticket_key)
+      return true
+    })
+    const firstPass = unique.filter((t: any) => !t.had_previous_returns)
+    const repeatPass = unique.filter((t: any) => t.had_previous_returns)
+    const sp = unique.reduce((s: number, t: any) => s + (t.story_points ?? 0), 0)
+    return {
+      ticket_count: unique.length,
+      story_points: sp,
+      first_time_count: firstPass.length,
+      repeat_count: repeatPass.length,
+      repeat_percentage: unique.length > 0 ? Math.round((repeatPass.length / unique.length) * 100) : 0,
+    }
+  }
 
-    qaMembers.set(member.qa_name, {
-      qa_assignee: member.qa_name,
-      today_stats: {
-        ticket_count: member.unique_ticket_count,
-        story_points: member.unique_ticket_story_points,
-        first_time_count: firstPassTickets.length,
-        repeat_count: repeatPassTickets.length,
-        repeat_percentage: repeatPercentage,
-      },
-      today_tickets: (member.tickets ?? []).map((ticket: any) => {
-        const completionTime = ticket.history_created
-          ? new Date(ticket.history_created).toLocaleTimeString('en-US', {
-              timeZone: 'America/New_York',
-              hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
-            }) + ' ET'
-          : new Date().toLocaleTimeString('en-US', {
-              timeZone: 'America/New_York',
-              hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
-            }) + ' ET'
+  const allNames = new Set<string>()
+  const w1Members: any[] = w1Data?.throughput?.per_qa_member_throughput ?? []
+  const priorMembers: any[] = priorW1Data?.throughput?.per_qa_member_throughput ?? []
+  for (const m of w1Members) allNames.add(m.qa_name)
+  for (const m of priorMembers) allNames.add(m.qa_name)
 
-        return {
-          ticket_id: ticket.ticket_key,
-          completed_time_et: completionTime,
-          story_points: ticket.story_points,
-          handled_stage: ticket.handled_stage,
-          new_stage: 'Done',
-          pass_type: ticket.had_previous_returns ? 'repeat_pass' : 'first_time_pass',
-          qa_return_cycles_count: ticket.qa_return_cycles_count ?? 0,
-          had_previous_returns: ticket.had_previous_returns ?? false,
-          recap: `${ticket.ticket_key} completed QA (${ticket.story_points ?? 0} pt${ticket.story_points === 1 ? '' : 's'}, ${ticket.had_previous_returns ? 'repeat' : 'first-time'} pass) moving from ${ticket.handled_stage} to Done.`,
-        }
-      }),
-      last_business_day_stats: {
-        ticket_count: 0, story_points: 0, first_time_count: 0, repeat_count: 0, repeat_percentage: 0,
-      },
-      last_business_day_tickets: [],
+  for (const name of allNames) {
+    const todayMember = w1Members.find((m: any) => m.qa_name === name)
+    const lbdMember = priorMembers.find((m: any) => m.qa_name === name)
+
+    qaMembers.set(name, {
+      qa_assignee: name,
+      today_stats: buildStats(w1Members, name),
+      today_tickets: (todayMember?.tickets ?? []).map(mapTicket),
+      last_business_day_stats: buildStats(priorMembers, name),
+      last_business_day_tickets: (lbdMember?.tickets ?? []).map(mapTicket),
     })
   }
 
