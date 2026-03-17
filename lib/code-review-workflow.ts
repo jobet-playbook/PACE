@@ -10,8 +10,10 @@
 
 import { JiraClient } from './jira-client'
 
-const FINAL_STATUS = ['Code Review']
+const FINAL_STATUS    = ['Code Review']
 const PUSHBACK_STATUS = ['In Progress']
+// T-Cycle end = first exit from Code Review that is NOT a pushback
+// (i.e. Ready for Dev, Done, QA, Push Staging — whatever comes next in the workflow)
 const PROJECTS = '"Playbook SaaS - Scrum", "PlayBook App"'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -21,6 +23,8 @@ export interface CRFinalTicket {
   creator: string
   tracked_pass_count: number   // 1 = first-pass, 2+ = had pushbacks
   story_points: number | null
+  cr_cycle_days: number | null  // days from ticket creation → first CR entry
+  t_cycle_days: number | null   // days from first CR entry → Ready for Dev
 }
 
 export interface CRPushbackEntry {
@@ -63,6 +67,9 @@ export interface CRWindowMetrics {
   missing_story_points: number
   first_pass_sp: number
   repeat_pass_sp: number
+  quality_issues: number        // tickets requiring 3+ passes
+  cr_cycle_avg_days: number     // avg days from creation → first CR entry
+  t_cycle_avg_days: number      // avg days from first CR entry → Ready for Dev
   pass_distribution: { p1: number; p2: number; p3: number; p4plus: number }
 }
 
@@ -106,25 +113,53 @@ export class CodeReviewWorkflowProcessor {
       { fields: 'customfield_10028,created,status,creator,summary' }
     )
 
-    const finalSet = new Set(FINAL_STATUS)
+    const finalSet    = new Set(FINAL_STATUS)
     const pushbackSet = new Set(PUSHBACK_STATUS)
+    const MS_PER_DAY = 1000 * 60 * 60 * 24
 
     return tickets.map((ticket: any) => {
       let trackedPassCount = 1
+      let firstCRTimestamp: number | null = null
+      let readyForDevTimestamp: number | null = null
+
+      const createdMs = ticket.fields?.created
+        ? new Date(ticket.fields.created).getTime()
+        : null
 
       const histories = [...(ticket.changelog?.histories ?? [])].sort(
         (a: any, b: any) => new Date(a.created).getTime() - new Date(b.created).getTime()
       )
 
       for (const history of histories) {
+        const historyMs = new Date(history.created).getTime()
         for (const item of [...(history.items ?? [])].reverse()) {
           if (item.field !== 'status') continue
-          // CR → In Progress = pushback = counts as another pass
+
+          // First time entering Code Review
+          if (finalSet.has(item.toString) && firstCRTimestamp === null) {
+            firstCRTimestamp = historyMs
+          }
+
+          // CR → In Progress = pushback
           if (finalSet.has(item.fromString) && pushbackSet.has(item.toString)) {
             trackedPassCount++
           }
+
+          // CR → any forward status (not a pushback) = T-Cycle end
+          // Captures: Ready for Dev, Done, QA, Push Staging, etc.
+          if (finalSet.has(item.fromString) && !pushbackSet.has(item.toString)) {
+            if (readyForDevTimestamp === null) readyForDevTimestamp = historyMs
+          }
         }
       }
+
+      const crCycleDays = (createdMs !== null && firstCRTimestamp !== null)
+        ? parseFloat(((firstCRTimestamp - createdMs) / MS_PER_DAY).toFixed(1))
+        : null
+
+      const tCycleDays = (firstCRTimestamp !== null && readyForDevTimestamp !== null)
+        ? parseFloat(((readyForDevTimestamp - firstCRTimestamp) / MS_PER_DAY).toFixed(1))
+        : null
 
       const spRaw = ticket.fields?.customfield_10028
       return {
@@ -132,6 +167,8 @@ export class CodeReviewWorkflowProcessor {
         creator: ticket.fields?.creator?.displayName ?? 'Unknown',
         tracked_pass_count: trackedPassCount,
         story_points: typeof spRaw === 'number' ? spRaw : null,
+        cr_cycle_days: crCycleDays,
+        t_cycle_days: tCycleDays,
       }
     })
   }
@@ -193,12 +230,11 @@ export class CodeReviewWorkflowProcessor {
   }
 
   private computeWindowMetrics(tickets: CRFinalTicket[]): CRWindowMetrics {
-    let weightedSP = 0
-    let rawSP = 0
-    let missingSP = 0
-    let firstPassSP = 0
-    let repeatPassSP = 0
+    let weightedSP = 0, rawSP = 0, missingSP = 0
+    let firstPassSP = 0, repeatPassSP = 0
     const passes = { p1: 0, p2: 0, p3: 0, p4plus: 0 }
+    const crCycleSamples: number[] = []
+    const tCycleSamples: number[] = []
 
     for (const t of tickets) {
       const attempts = t.tracked_pass_count || 1
@@ -217,11 +253,16 @@ export class CodeReviewWorkflowProcessor {
         } else {
           if (attempts === 2) weightedSP += t.story_points * 0.33
           else if (attempts === 3) weightedSP += t.story_points * 0.25
-          // 4+ passes = 0 weight
           repeatPassSP += t.story_points
         }
       }
+
+      if (t.cr_cycle_days !== null && t.cr_cycle_days >= 0) crCycleSamples.push(t.cr_cycle_days)
+      if (t.t_cycle_days  !== null && t.t_cycle_days  >= 0) tCycleSamples.push(t.t_cycle_days)
     }
+
+    const avg = (arr: number[]) =>
+      arr.length === 0 ? 0 : parseFloat((arr.reduce((s, v) => s + v, 0) / arr.length).toFixed(1))
 
     return {
       total_tickets: tickets.length,
@@ -230,6 +271,9 @@ export class CodeReviewWorkflowProcessor {
       missing_story_points: missingSP,
       first_pass_sp: firstPassSP,
       repeat_pass_sp: repeatPassSP,
+      quality_issues: passes.p3 + passes.p4plus,
+      cr_cycle_avg_days: avg(crCycleSamples),
+      t_cycle_avg_days: avg(tCycleSamples),
       pass_distribution: passes,
     }
   }

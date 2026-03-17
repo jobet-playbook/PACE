@@ -382,13 +382,19 @@ export default function DashboardPage() {
               totalSP: w7.raw_story_points,
               agingOver7: exclusions.length,
             },
-            qCycle: { last7: 0, last28: 0 },
-            tCycle: { last7: 0, last28: 0 },
+            qCycle: {
+              last7: w7?.cr_cycle_avg_days ?? 0,
+              last28: w28?.cr_cycle_avg_days ?? 0,
+            },
+            tCycle: {
+              last7: w7?.t_cycle_avg_days ?? 0,
+              last28: w28?.t_cycle_avg_days ?? 0,
+            },
             rAgeCycle: {
               last7: cycle_times?.r_age_cycle_w7 ?? 0,
               last28: cycle_times?.r_age_cycle_w28 ?? 0,
             },
-            escapedDefects: 0,
+            escapedDefects: w7?.quality_issues ?? 0,
             critBugs: { open: exclusions.length, resolved: 0 },
           },
           criticalTickets: exclusions.map((ex: any) => {

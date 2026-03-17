@@ -66,6 +66,9 @@ export async function writeCRToNormalizedTables(
           missing_story_points: metrics.missing_story_points,
           first_pass_sp: metrics.first_pass_sp,
           repeat_pass_sp: metrics.repeat_pass_sp,
+          quality_issues: metrics.quality_issues,
+          cr_cycle_avg_days: metrics.cr_cycle_avg_days,
+          t_cycle_avg_days: metrics.t_cycle_avg_days,
           p1: metrics.pass_distribution.p1,
           p2: metrics.pass_distribution.p2,
           p3: metrics.pass_distribution.p3,
@@ -96,6 +99,8 @@ export async function writeCRToNormalizedTables(
         missing_sp: o.missing_sp,
         first_pass_count: o.first_pass_count,
         repeat_pass_count: o.repeat_pass_count,
+        first_pass_sp: o.first_pass_sp,
+        repeat_pass_sp: o.repeat_pass_sp,
       }))
     )
     if (error) console.error('⚠️ [CR DB] owner_metrics insert:', error.message)
@@ -151,5 +156,23 @@ export async function readCRFromNormalizedTables(
   const age = Date.now() - new Date(data.synced_at).getTime()
   if (age > SNAPSHOT_MAX_AGE_MS) return null
 
-  return data.data as CRData
+  const d = data.data as CRData
+
+  // Schema-version guard: if the snapshot was written before we added
+  // cr_cycle_avg_days / t_cycle_avg_days / quality_issues / first_pass_sp
+  // the fields will be absent — force a live Jira re-fetch in that case.
+  if (
+    d?.w7?.cr_cycle_avg_days === undefined ||
+    d?.w7?.t_cycle_avg_days  === undefined ||
+    d?.w7?.quality_issues     === undefined ||
+    d?.w7?.first_pass_sp      === undefined ||
+    d?.prior_w7_owners        === undefined ||
+    d?.monthly_owners         === undefined ||
+    d?.w28                    === undefined
+  ) {
+    console.log('⚠️ [CR DB] Snapshot schema outdated — forcing live re-fetch')
+    return null
+  }
+
+  return d
 }
