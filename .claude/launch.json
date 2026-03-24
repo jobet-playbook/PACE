@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "next-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "dev"],
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "prisma-studio",
+      "runtimeExecutable": "npx.cmd",
+      "runtimeArgs": ["prisma", "studio"],
+      "port": 5555
+    }
+  ]
+}

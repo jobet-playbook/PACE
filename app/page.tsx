@@ -2,29 +2,14 @@
 
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { PaceDashboardTab } from "@/components/pace-dashboard"
-import {
-  docSnapshotMetrics,
-  docCriticalTickets,
-  docAgingTickets,
-  docDailyPerformance,
-  docTeamMemberPerformance,
-  docAllStatuses,
-  crSnapshotMetrics,
-  crCriticalTickets,
-  crAgingTickets,
-  crDailyPerformance,
-  crTeamMemberPerformance,
-  crAllStatuses,
-  docAIInsights,
-  crAIInsights,
-} from "@/lib/dashboard-data"
+import type { TripsMemberPace } from "@/lib/dashboard-data"
 import { TripsSummary } from "@/components/trips-summary"
 import { DataModel } from "@/components/data-model"
 import { InfrastructureDashboard } from "@/components/infrastructure-dashboard"
 import { SupportDashboard } from "@/components/support-dashboard"
 import { ClientKnowledgeDashboard } from "@/components/client-knowledge-dashboard"
 import { ShieldCheck, FileText, GitPullRequest, Layers, Database, Server, Headphones, BookOpen } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { supabase } from "@/lib/supabase"
 
 export default function DashboardPage() {
@@ -33,6 +18,12 @@ export default function DashboardPage() {
   const [testingData, setTestingData] = useState<any>(null)
   const [crData, setCrData] = useState<any>(null)
   const [crLoading, setCrLoading] = useState(true)
+  const [docData, setDocData] = useState<any>(null)
+  const [docLoading, setDocLoading] = useState(true)
+  const [supportData, setSupportData] = useState<any>(null)
+  const [supportLoading, setSupportLoading] = useState(true)
+  const [crRaw, setCrRaw] = useState<any>(null)
+  const [docRaw, setDocRaw] = useState<any>(null)
 
   useEffect(() => {
     async function fetchQAData() {
@@ -339,6 +330,7 @@ export default function DashboardPage() {
         const res = await fetch('/api/code-review-metrics/live')
         const d = await res.json()
         if (d.error) { setCrData(null); return }
+        setCrRaw(d)
 
         const { w7, prior_w7, w28, owners, prior_w7_owners, monthly_owners, exclusions, cycle_times, report_date, deltas } = d
 
@@ -518,6 +510,293 @@ export default function DashboardPage() {
     fetchCRData()
   }, [])
 
+  useEffect(() => {
+    async function fetchDocData() {
+      try {
+        const res = await fetch('/api/documentation-metrics/live')
+        const d = await res.json()
+        if (d.error) { setDocData(null); return }
+        setDocRaw(d)
+
+        const { w7, prior_w7, w28, owners, prior_w7_owners, monthly_owners, exclusions, cycle_times, wip, report_date, deltas } = d
+
+        const priorOwnerMap = new Map<string, any>()
+        for (const po of (prior_w7_owners ?? [])) priorOwnerMap.set(po.owner, po)
+
+        const monthlyOwnerMap = new Map<string, any>()
+        for (const mo of (monthly_owners ?? [])) monthlyOwnerMap.set(mo.owner, mo)
+
+        const allOwnerNames = Array.from(new Set([
+          ...owners.map((o: any) => o.owner),
+          ...(prior_w7_owners ?? []).map((o: any) => o.owner),
+          ...(monthly_owners ?? []).map((o: any) => o.owner),
+        ]))
+
+        const daysSince = (ts: string | undefined) => {
+          if (!ts) return 0
+          const days = (Date.now() - new Date(ts).getTime()) / (1000 * 60 * 60 * 24)
+          return Math.max(0, parseFloat(days.toFixed(1)))
+        }
+
+        setDocData({
+          metrics: {
+            spThroughput: {
+              last7: w7.weighted_story_points,
+              last7Delta: deltas?.weighted_sp_change_pct ?? 0,
+              last28: w28?.weighted_story_points ?? 0,
+              last28Delta: 0,
+              prior7: prior_w7.weighted_story_points,
+              prior28: 0,
+            },
+            pace: {
+              last7: w7.weighted_story_points,
+              last28: w28?.weighted_story_points ?? 0,
+            },
+            assignedVolume: {
+              totalTickets: wip?.total_tickets ?? 0,
+              totalSP: wip?.total_story_points ?? 0,
+              agingOver7: wip?.old_prd_wip_tickets?.length ?? 0,
+            },
+            qCycle: {
+              last7: w7?.d_cycle_avg_days ?? 0,
+              last28: w28?.d_cycle_avg_days ?? 0,
+            },
+            tCycle: {
+              last7: w7?.t_cycle_avg_days ?? 0,
+              last28: w28?.t_cycle_avg_days ?? 0,
+            },
+            rAgeCycle: {
+              last7: cycle_times?.r_age_cycle_w7 ?? 0,
+              last28: cycle_times?.r_age_cycle_w28 ?? 0,
+            },
+            escapedDefects: w7?.quality_issues ?? 0,
+            critBugs: {
+              open: wip?.critical_prd_wip_tickets?.length ?? 0,
+              resolved: 0,
+            },
+          },
+          criticalTickets: (wip?.critical_prd_wip_tickets ?? []).map((t: any) => ({
+            key: t.key,
+            recentAge: t.recent_age_bd,
+            age: t.age_bd,
+            sp: t.story_points,
+            assignee: t.assignee,
+            developer: t.developer,
+            returnCount: t.tracked_pass_count - 1,
+            firstQA: t.first_tracked_date,
+            latestQA: t.latest_tracked_date,
+            status: t.status,
+            summary: t.summary,
+          })),
+          agingTickets: (wip?.old_prd_wip_tickets ?? []).map((t: any) => ({
+            key: t.key,
+            recentAge: t.recent_age_bd,
+            age: t.age_bd,
+            sp: t.story_points,
+            assignee: t.assignee,
+            developer: t.developer,
+            returnCount: t.tracked_pass_count - 1,
+            firstQA: t.first_tracked_date,
+            latestQA: t.latest_tracked_date,
+            status: t.status,
+            summary: t.summary,
+          })),
+          dailyPerformance: {
+            today: {
+              date: `Last 7 Days (${report_date})`,
+              tickets: w7.total_tickets,
+              sp: w7.raw_story_points,
+              firstPass: w7.pass_distribution.p1,
+              firstPassSP: w7.first_pass_sp ?? 0,
+              repeatPass: w7.total_tickets - w7.pass_distribution.p1,
+              repeatPassSP: w7.repeat_pass_sp ?? 0,
+            },
+            previous: {
+              date: 'Prior 7 Days',
+              tickets: prior_w7.total_tickets,
+              sp: prior_w7.raw_story_points,
+              firstPass: prior_w7.pass_distribution.p1,
+              firstPassSP: prior_w7.first_pass_sp ?? 0,
+              repeatPass: prior_w7.total_tickets - prior_w7.pass_distribution.p1,
+              repeatPassSP: prior_w7.repeat_pass_sp ?? 0,
+            },
+            last30BD: {
+              tickets: w28?.total_tickets ?? 0,
+              sp: w28?.raw_story_points ?? 0,
+              firstPass: w28?.pass_distribution?.p1 ?? 0,
+              repeatPass: (w28?.total_tickets ?? 0) - (w28?.pass_distribution?.p1 ?? 0),
+              repeatPassSP: w28?.repeat_pass_sp ?? 0,
+            },
+          },
+          teamMembers: allOwnerNames.map((name: string) => {
+            const o  = owners.find((x: any) => x.owner === name)
+            const po = priorOwnerMap.get(name)
+            const mo = monthlyOwnerMap.get(name)
+            const churn = o
+              ? (o.ticket_count > 0 ? Math.round((o.repeat_pass_count / o.ticket_count) * 100) : 0)
+              : 0
+            const priorChurn = po
+              ? (po.ticket_count > 0 ? Math.round((po.repeat_pass_count / po.ticket_count) * 100) : 0)
+              : 0
+            return {
+              name,
+              today: {
+                tickets: o?.ticket_count ?? 0,
+                sp: o?.weighted_sp ?? 0,
+                firstPass: o?.first_pass_count ?? 0,
+                firstPassSP: o?.first_pass_sp ?? 0,
+                repeatPass: o?.repeat_pass_count ?? 0,
+                repeatPassSP: o?.repeat_pass_sp ?? 0,
+                churn,
+              },
+              previousDay: {
+                tickets: po?.ticket_count ?? 0,
+                sp: po?.weighted_sp ?? 0,
+                firstPass: po?.first_pass_count ?? 0,
+                firstPassSP: po?.first_pass_sp ?? 0,
+                repeatPass: po?.repeat_pass_count ?? 0,
+                repeatPassSP: po?.repeat_pass_sp ?? 0,
+                churn: priorChurn,
+              },
+              weekly: {
+                tickets: o?.ticket_count ?? 0,
+                sp: o?.weighted_sp ?? 0,
+                firstPass: o?.first_pass_count ?? 0,
+                repeatPass: o?.repeat_pass_count ?? 0,
+                avgCycleTime: cycle_times?.r_age_cycle_w7 ?? 0,
+              },
+              monthly: {
+                tickets: mo?.ticket_count ?? 0,
+                sp: mo?.weighted_sp ?? 0,
+                firstPass: mo?.first_pass_count ?? 0,
+                repeatPass: mo?.repeat_pass_count ?? 0,
+                avgCycleTime: cycle_times?.r_age_cycle_w28 ?? 0,
+              },
+              dailyRhythm: o
+                ? `${o.ticket_count} ticket${o.ticket_count !== 1 ? 's' : ''} ready for dev this week · ${o.first_pass_count} first-pass, ${o.repeat_pass_count} pushbacks`
+                : 'No tickets ready for dev this week',
+              activities: (o?.tickets ?? []).map((t: any) => ({
+                ticketKey: t.key,
+                sp: t.story_points ?? 0,
+                type: t.tracked_pass_count === 1 ? 'First Pass' : `Pushback #${t.tracked_pass_count - 1}`,
+                time: '',
+                description: `${t.key} moved to Ready for Dev (${t.story_points ?? 0} pts, ${t.tracked_pass_count === 1 ? 'first-time' : `pushback #${t.tracked_pass_count - 1}`})`,
+              })),
+            }
+          }),
+          allMembers: allOwnerNames,
+          allStatuses: ['Open', 'Elaboration', 'In Progress'],
+          aiInsights: [],
+        })
+      } catch {
+        setDocData(null)
+      } finally {
+        setDocLoading(false)
+      }
+    }
+    fetchDocData()
+  }, [])
+
+  useEffect(() => {
+    async function fetchSupportData() {
+      try {
+        const res = await fetch('/api/support-metrics/live')
+        const d = await res.json()
+        if (d.error) { setSupportData(null); return }
+        setSupportData(d)
+      } catch {
+        setSupportData(null)
+      } finally {
+        setSupportLoading(false)
+      }
+    }
+    fetchSupportData()
+  }, [])
+
+  // ── Derive TRIPS member data from live API responses ─────────────────────
+  const crMembers = useMemo<TripsMemberPace[]>(() => {
+    if (!crRaw?.owners) return []
+    const w7Owners = crRaw.owners ?? []
+    const priorOwners = crRaw.prior_w7_owners ?? []
+    const w28Owners = crRaw.monthly_owners ?? []
+    const priorMap = new Map<string, any>()
+    for (const o of priorOwners) priorMap.set(o.owner, o)
+    const w28Map = new Map<string, any>()
+    for (const o of w28Owners) w28Map.set(o.owner, o)
+    const allNames = Array.from(new Set([
+      ...w7Owners.map((o: any) => o.owner),
+      ...priorOwners.map((o: any) => o.owner),
+      ...w28Owners.map((o: any) => o.owner),
+    ]))
+    return allNames.map((name: string) => {
+      const w7 = w7Owners.find((o: any) => o.owner === name)
+      const prior = priorMap.get(name)
+      const w28 = w28Map.get(name)
+      const sp7 = w7?.weighted_sp ?? 0
+      const sp14 = sp7 + (prior?.weighted_sp ?? 0)
+      const sp30 = w28?.weighted_sp ?? sp7 * 4
+      const tix7 = w7?.ticket_count ?? 0
+      const tix14 = tix7 + (prior?.ticket_count ?? 0)
+      const tix30 = w28?.ticket_count ?? tix7 * 4
+      return {
+        name,
+        pace: { 7: sp7, 14: sp14, 30: sp30 },
+        sp: { 7: w7?.raw_sp ?? 0, 14: (w7?.raw_sp ?? 0) + (prior?.raw_sp ?? 0), 30: w28?.raw_sp ?? 0 },
+        tickets: { 7: tix7, 14: tix14, 30: tix30 },
+        avg60DailyPace: sp30 / 28,
+      }
+    })
+  }, [crRaw])
+
+  const docMembers = useMemo<TripsMemberPace[]>(() => {
+    if (!docRaw?.owners) return []
+    const w7Owners = docRaw.owners ?? []
+    const priorOwners = docRaw.prior_w7_owners ?? []
+    const w28Owners = docRaw.monthly_owners ?? []
+    const priorMap = new Map<string, any>()
+    for (const o of priorOwners) priorMap.set(o.owner, o)
+    const w28Map = new Map<string, any>()
+    for (const o of w28Owners) w28Map.set(o.owner, o)
+    const allNames = Array.from(new Set([
+      ...w7Owners.map((o: any) => o.owner),
+      ...priorOwners.map((o: any) => o.owner),
+      ...w28Owners.map((o: any) => o.owner),
+    ]))
+    return allNames.map((name: string) => {
+      const w7 = w7Owners.find((o: any) => o.owner === name)
+      const prior = priorMap.get(name)
+      const w28 = w28Map.get(name)
+      const sp7 = w7?.weighted_sp ?? 0
+      const sp14 = sp7 + (prior?.weighted_sp ?? 0)
+      const sp30 = w28?.weighted_sp ?? sp7 * 4
+      const tix7 = w7?.ticket_count ?? 0
+      const tix14 = tix7 + (prior?.ticket_count ?? 0)
+      const tix30 = w28?.ticket_count ?? tix7 * 4
+      return {
+        name,
+        pace: { 7: sp7, 14: sp14, 30: sp30 },
+        sp: { 7: w7?.raw_sp ?? 0, 14: (w7?.raw_sp ?? 0) + (prior?.raw_sp ?? 0), 30: w28?.raw_sp ?? 0 },
+        tickets: { 7: tix7, 14: tix14, 30: tix30 },
+        avg60DailyPace: sp30 / 28,
+      }
+    })
+  }, [docRaw])
+
+  const supportMembers = useMemo<TripsMemberPace[]>(() => {
+    if (!supportData?.by_agent) return []
+    return supportData.by_agent.map((a: any) => {
+      const pace = a.total_pace_points ?? a.tickets_resolved ?? 0
+      const tickets = a.tickets_resolved ?? 0
+      return {
+        name: a.agent_name,
+        pace: { 7: pace, 14: pace, 30: pace },
+        sp: { 7: pace, 14: pace, 30: pace },
+        tickets: { 7: tickets, 14: tickets, 30: tickets },
+        avg60DailyPace: pace / 7,
+      }
+    })
+  }, [supportData])
+
   return (
     <main className="min-h-screen bg-background">
       {/* Header */}
@@ -531,7 +810,7 @@ export default function DashboardPage() {
             <p className="text-xs text-muted-foreground">TRIPS Performance Tracking - Testing, Review, Infrastructure, PRD, Support</p>
           </div>
           <span className="ml-auto rounded bg-muted px-2.5 py-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
-            February 23, 2026
+            {new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
           </span>
         </div>
       </header>
@@ -576,7 +855,7 @@ export default function DashboardPage() {
 
           {/* TRIPS Summary Tab */}
           <TabsContent value="trips">
-            <TripsSummary testingMembers={testingData} />
+            <TripsSummary testingMembers={testingData} crMembers={crMembers} docMembers={docMembers} supportMembers={supportMembers} />
           </TabsContent>
 
           {/* QA PACE Tab */}
@@ -630,28 +909,38 @@ export default function DashboardPage() {
 
           {/* Documentation PACE Tab */}
           <TabsContent value="documentation">
-            <PaceDashboardTab
-              label="Documentation"
-              dashboardType="documentation"
-              metrics={docSnapshotMetrics}
-              criticalTickets={docCriticalTickets}
-              agingTickets={docAgingTickets}
-              dailyPerformance={docDailyPerformance}
-              teamMembers={docTeamMemberPerformance}
-              allMembers={["Jordan Beebe", "Mike Del Signore", "Joey Stapleton", "charlson", "Corbin Schmeil"]}
-              allStatuses={docAllStatuses}
-              paceLabel="Documentation PACE"
-              volumeLabel="Assigned to Documentation Volume (Last 7 Days)"
-              qCycleLabel="D-Cycle (To Documentation)"
-              tCycleLabel="T-Cycle Time (To Ready for Dev)"
-              rAgeLabel="R-Age Cycle Time (Doc Pushback)"
-              defectsLabel="[Beta] Doc Gaps Identified (Last 7 Days)"
-              critBugsLabel="Critical Doc Issues (Last 7 Days)"
-              performanceTitle="Daily Documentation Performance"
-              critTableTitle="Critical Documentation Tickets"
-              agingTableTitle="Aging in Documentation (Age > 3 BD)"
-              aiInsights={docAIInsights}
-            />
+            {docLoading ? (
+              <div className="flex items-center justify-center h-96">
+                <p className="text-muted-foreground">Loading Documentation data...</p>
+              </div>
+            ) : docData ? (
+              <PaceDashboardTab
+                label="Documentation"
+                dashboardType="documentation"
+                metrics={docData.metrics}
+                criticalTickets={docData.criticalTickets}
+                agingTickets={docData.agingTickets}
+                dailyPerformance={docData.dailyPerformance}
+                teamMembers={docData.teamMembers}
+                allMembers={docData.allMembers}
+                allStatuses={docData.allStatuses}
+                paceLabel="Documentation PACE"
+                volumeLabel="Assigned to Documentation Volume (Last 7 Days)"
+                qCycleLabel="D-Cycle (To Documentation)"
+                tCycleLabel="T-Cycle Time (To Ready for Dev)"
+                rAgeLabel="R-Age Cycle Time (Doc Pushback)"
+                defectsLabel="[Beta] Doc Gaps Identified (Last 7 Days)"
+                critBugsLabel="Critical Doc Issues (Last 7 Days)"
+                performanceTitle="Daily Documentation Performance"
+                critTableTitle="Critical Documentation Tickets"
+                agingTableTitle="Aging in Documentation (Age > 3 BD)"
+                aiInsights={docData.aiInsights}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-96">
+                <p className="text-muted-foreground">No Documentation data available</p>
+              </div>
+            )}
           </TabsContent>
 
           {/* Code Review PACE Tab */}
@@ -697,7 +986,7 @@ export default function DashboardPage() {
 
           {/* Support Tab */}
           <TabsContent value="support">
-            <SupportDashboard />
+            <SupportDashboard liveData={supportData} loading={supportLoading} />
           </TabsContent>
 
           {/* Client.MD Tab */}

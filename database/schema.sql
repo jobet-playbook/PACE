@@ -486,6 +486,238 @@ INSERT INTO pace_qa_team_members (name, email, role) VALUES
 ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================
+-- SUPPORT METRICS TABLES
+-- ============================================================
+
+-- Stores daily support report summaries
+CREATE TABLE pace_support_daily_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_date DATE NOT NULL UNIQUE,
+  window_days INTEGER NOT NULL DEFAULT 7,
+  total_tickets_resolved INTEGER NOT NULL DEFAULT 0,
+  total_pace_points INTEGER NOT NULL DEFAULT 0,
+  avg_cycle_time NUMERIC(10,2) DEFAULT 0,
+  median_cycle_time NUMERIC(10,2) DEFAULT 0,
+  p90_cycle_time NUMERIC(10,2) DEFAULT 0,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_support_daily_reports_date ON pace_support_daily_reports(report_date DESC);
+
+-- Stores per-agent aggregated stats for each daily report
+CREATE TABLE pace_support_agent_stats (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_id UUID NOT NULL REFERENCES pace_support_daily_reports(id) ON DELETE CASCADE,
+  agent_name VARCHAR(255) NOT NULL,
+  tickets_resolved INTEGER NOT NULL DEFAULT 0,
+  total_pace_points INTEGER NOT NULL DEFAULT 0,
+  avg_cycle_time NUMERIC(10,2) DEFAULT 0,
+  median_cycle_time NUMERIC(10,2) DEFAULT 0,
+  p90_cycle_time NUMERIC(10,2) DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_support_agent_stats_report ON pace_support_agent_stats(report_id);
+
+-- Stores individual support issues/conversations for each daily report
+CREATE TABLE pace_support_issues (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_id UUID NOT NULL REFERENCES pace_support_daily_reports(id) ON DELETE CASCADE,
+  front_conversation_id VARCHAR(255) NOT NULL,
+  client_name VARCHAR(255),
+  summary TEXT,
+  priority VARCHAR(50) DEFAULT 'Medium',
+  weight NUMERIC(5,2) DEFAULT 1,
+  status VARCHAR(50) DEFAULT 'Resolved',
+  assignee VARCHAR(255) DEFAULT 'Unattributed',
+  date_opened TIMESTAMPTZ,
+  date_resolved TIMESTAMPTZ,
+  hours_to_resolve NUMERIC(10,2),
+  exceeds_24_hours BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_support_issues_report ON pace_support_issues(report_id);
+CREATE INDEX idx_pace_support_issues_assignee ON pace_support_issues(assignee);
+
+-- Enable RLS
+ALTER TABLE pace_support_daily_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pace_support_agent_stats ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pace_support_issues ENABLE ROW LEVEL SECURITY;
+
+-- Read policies
+CREATE POLICY "Allow read access to authenticated users" ON pace_support_daily_reports
+  FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow read access to authenticated users" ON pace_support_agent_stats
+  FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow read access to authenticated users" ON pace_support_issues
+  FOR SELECT USING (auth.role() = 'authenticated');
+
+-- Service role write policies
+CREATE POLICY "Allow all for service role" ON pace_support_daily_reports
+  FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "Allow all for service role" ON pace_support_agent_stats
+  FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "Allow all for service role" ON pace_support_issues
+  FOR ALL USING (auth.role() = 'service_role');
+
+COMMENT ON TABLE pace_support_daily_reports IS 'Stores daily support metric report summaries from Front';
+COMMENT ON TABLE pace_support_agent_stats IS 'Stores per-agent aggregated support stats';
+COMMENT ON TABLE pace_support_issues IS 'Stores individual support conversations/issues';
+
+-- ============================================================
+-- DOCUMENTATION / PRD METRICS TABLES
+-- ============================================================
+
+-- Stores daily documentation report summaries
+CREATE TABLE pace_doc_daily_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_date DATE NOT NULL UNIQUE,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status VARCHAR(10) DEFAULT 'GREEN',
+  recommendations TEXT[] DEFAULT '{}',
+  weighted_sp_change_pct NUMERIC(10,2) DEFAULT 0,
+  raw_sp_change_pct NUMERIC(10,2) DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_doc_daily_reports_date ON pace_doc_daily_reports(report_date DESC);
+
+-- Stores window metrics (w7, prior_w7, w28) per daily report
+CREATE TABLE pace_doc_window_metrics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_id UUID NOT NULL REFERENCES pace_doc_daily_reports(id) ON DELETE CASCADE,
+  window_type VARCHAR(20) NOT NULL, -- 'w7', 'prior_w7', 'w28'
+  total_tickets INTEGER NOT NULL DEFAULT 0,
+  raw_story_points NUMERIC(10,2) DEFAULT 0,
+  weighted_story_points NUMERIC(10,2) DEFAULT 0,
+  missing_story_points INTEGER DEFAULT 0,
+  first_pass_sp NUMERIC(10,2) DEFAULT 0,
+  repeat_pass_sp NUMERIC(10,2) DEFAULT 0,
+  quality_issues INTEGER DEFAULT 0,
+  d_cycle_avg_days NUMERIC(10,2) DEFAULT 0,
+  t_cycle_avg_days NUMERIC(10,2) DEFAULT 0,
+  p1 INTEGER DEFAULT 0,
+  p2 INTEGER DEFAULT 0,
+  p3 INTEGER DEFAULT 0,
+  p4plus INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (report_id, window_type)
+);
+
+CREATE INDEX idx_pace_doc_window_metrics_report ON pace_doc_window_metrics(report_id);
+
+-- Stores per-owner metrics per window per daily report
+CREATE TABLE pace_doc_owner_metrics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_id UUID NOT NULL REFERENCES pace_doc_daily_reports(id) ON DELETE CASCADE,
+  owner VARCHAR(255) NOT NULL,
+  window_type VARCHAR(20) NOT NULL DEFAULT 'w7',
+  ticket_count INTEGER NOT NULL DEFAULT 0,
+  ticket_keys TEXT,
+  raw_sp NUMERIC(10,2) DEFAULT 0,
+  weighted_sp NUMERIC(10,2) DEFAULT 0,
+  missing_sp INTEGER DEFAULT 0,
+  first_pass_count INTEGER DEFAULT 0,
+  repeat_pass_count INTEGER DEFAULT 0,
+  first_pass_sp NUMERIC(10,2) DEFAULT 0,
+  repeat_pass_sp NUMERIC(10,2) DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_doc_owner_metrics_report ON pace_doc_owner_metrics(report_id);
+
+-- Stores pushback exclusions per daily report
+CREATE TABLE pace_doc_exclusions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_id UUID NOT NULL REFERENCES pace_doc_daily_reports(id) ON DELETE CASCADE,
+  ticket_key VARCHAR(50) NOT NULL,
+  pass_count INTEGER DEFAULT 1,
+  last_assignee VARCHAR(255),
+  last_status VARCHAR(100),
+  pushback_history JSONB DEFAULT '[]',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_doc_exclusions_report ON pace_doc_exclusions(report_id);
+
+-- Stores WIP tickets in documentation (Open/Elaboration)
+CREATE TABLE pace_doc_wip_tickets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  report_id UUID NOT NULL REFERENCES pace_doc_daily_reports(id) ON DELETE CASCADE,
+  ticket_key VARCHAR(50) NOT NULL,
+  summary TEXT,
+  creator VARCHAR(255),
+  assignee VARCHAR(255),
+  developer VARCHAR(255),
+  story_points NUMERIC(10,2),
+  priority VARCHAR(50),
+  status VARCHAR(50),
+  age_bd INTEGER DEFAULT 0,
+  recent_age_bd INTEGER DEFAULT 0,
+  first_tracked_date VARCHAR(20),
+  latest_tracked_date VARCHAR(20),
+  tracked_pass_count INTEGER DEFAULT 1,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_doc_wip_tickets_report ON pace_doc_wip_tickets(report_id);
+
+-- Stores full DocData JSON snapshots for quick reads
+CREATE TABLE pace_doc_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source VARCHAR(50) DEFAULT 'sync',
+  data JSONB NOT NULL,
+  synced_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_pace_doc_snapshots_synced ON pace_doc_snapshots(synced_at DESC);
+
+-- Enable RLS
+ALTER TABLE pace_doc_daily_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pace_doc_window_metrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pace_doc_owner_metrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pace_doc_exclusions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pace_doc_wip_tickets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pace_doc_snapshots ENABLE ROW LEVEL SECURITY;
+
+-- Read policies
+CREATE POLICY "Allow read access to authenticated users" ON pace_doc_daily_reports
+  FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow read access to authenticated users" ON pace_doc_window_metrics
+  FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow read access to authenticated users" ON pace_doc_owner_metrics
+  FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow read access to authenticated users" ON pace_doc_exclusions
+  FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow read access to authenticated users" ON pace_doc_wip_tickets
+  FOR SELECT USING (auth.role() = 'authenticated');
+CREATE POLICY "Allow read access to authenticated users" ON pace_doc_snapshots
+  FOR SELECT USING (auth.role() = 'authenticated');
+
+-- Service role write policies
+CREATE POLICY "Allow all for service role" ON pace_doc_daily_reports
+  FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "Allow all for service role" ON pace_doc_window_metrics
+  FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "Allow all for service role" ON pace_doc_owner_metrics
+  FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "Allow all for service role" ON pace_doc_exclusions
+  FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "Allow all for service role" ON pace_doc_wip_tickets
+  FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "Allow all for service role" ON pace_doc_snapshots
+  FOR ALL USING (auth.role() = 'service_role');
+
+COMMENT ON TABLE pace_doc_daily_reports IS 'Stores daily documentation/PRD metric report summaries';
+COMMENT ON TABLE pace_doc_window_metrics IS 'Stores windowed metrics (w7, prior_w7, w28) for documentation';
+COMMENT ON TABLE pace_doc_owner_metrics IS 'Stores per-owner documentation throughput per window';
+COMMENT ON TABLE pace_doc_exclusions IS 'Stores documentation pushback exclusions with history';
+COMMENT ON TABLE pace_doc_wip_tickets IS 'Stores WIP tickets currently in Open/Elaboration';
+COMMENT ON TABLE pace_doc_snapshots IS 'Stores full DocData JSON snapshots for quick reads';
+
+-- ============================================================
 -- COMMENTS FOR DOCUMENTATION
 -- ============================================================
 

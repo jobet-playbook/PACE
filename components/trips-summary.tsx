@@ -82,18 +82,26 @@ function DeltaBadge({ delta }: { delta: number | null }) {
 
 interface TripsSummaryProps {
   testingMembers?: TripsMemberPace[]
+  crMembers?: TripsMemberPace[]
+  docMembers?: TripsMemberPace[]
+  supportMembers?: TripsMemberPace[]
 }
 
-export function TripsSummary({ testingMembers }: TripsSummaryProps) {
+export function TripsSummary({ testingMembers, crMembers, docMembers, supportMembers }: TripsSummaryProps) {
   const [days, setDays] = useState<DayWindow>(7)
 
-  // Use live testing data if available, otherwise fall back to static data
+  // Use live data if available, otherwise fall back to static data
+  const liveOverrides: Record<string, TripsMemberPace[] | undefined> = {
+    T: testingMembers,
+    R: crMembers,
+    P: docMembers,
+    S: supportMembers,
+  }
+
   const updatedTripsTeams = tripsTeams.map((team) => {
-    if (team.key === "T" && testingMembers && testingMembers.length > 0) {
-      return {
-        ...team,
-        members: testingMembers,
-      }
+    const liveMembers = liveOverrides[team.key]
+    if (liveMembers && liveMembers.length > 0) {
+      return { ...team, members: liveMembers }
     }
     return team
   })

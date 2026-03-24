@@ -25,12 +25,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import {
-  supportIssuesData,
-  supportMemberStats,
-  supportPaceSummary,
-} from "@/lib/dashboard-data"
+// Static data imports removed — Support tab now uses only live data
 import type { SupportIssue, SupportPriority, SupportStatus } from "@/lib/dashboard-data"
+import type { SupportMetricsData } from "@/lib/support-workflow"
 import {
   Headphones,
   HelpCircle,
@@ -77,36 +74,89 @@ function StatusIcon({ status }: { status: SupportStatus }) {
   }
 }
 
-export function SupportDashboard() {
+interface SupportDashboardProps {
+  liveData?: SupportMetricsData | null
+  loading?: boolean
+}
+
+export function SupportDashboard({ liveData, loading }: SupportDashboardProps = {}) {
   const [timeWindow, setTimeWindow] = useState("7")
   const [filterAssignee, setFilterAssignee] = useState("all")
   const [filterStatus, setFilterStatus] = useState("all")
   const [filterPriority, setFilterPriority] = useState("all")
 
-  const paceSummary = timeWindow === "7"
-    ? supportPaceSummary.last7Days
-    : timeWindow === "14"
-      ? supportPaceSummary.last14Days
-      : supportPaceSummary.last30Days
+  // Map live data to existing UI types when available
+  const issuesData: SupportIssue[] = useMemo(() => {
+    if (!liveData) return []
+    return liveData.issues.map(i => ({
+      id: i.id,
+      clientName: i.clientName,
+      summary: i.summary,
+      priority: i.priority,
+      weight: i.weight,
+      status: i.status,
+      assignee: i.assignee,
+      dateOpened: i.dateOpened,
+      dateResolved: i.dateResolved,
+      hoursToResolve: i.hoursToResolve,
+      exceeds24Hours: i.exceeds24Hours,
+    }))
+  }, [liveData])
+
+  const memberStats = useMemo(() => {
+    if (!liveData) return []
+    return liveData.member_stats
+  }, [liveData])
+
+  const paceSummary = useMemo(() => {
+    if (liveData) {
+      // Live data is always for the configured window; use for all windows
+      const over24Count = liveData.issues.filter(i => i.exceeds24Hours).length
+      const openCount = liveData.issues.filter(i => i.status !== 'Resolved').length
+      return {
+        totalWeightedPace: liveData.overall.total_pace_points ?? liveData.total_tickets_resolved,
+        issuesSolved: liveData.total_tickets_resolved,
+        avgResolutionHours: liveData.overall.avg_cycle_time,
+        over24HourCount: over24Count,
+        openIssues: openCount,
+      }
+    }
+    return {
+      totalWeightedPace: 0,
+      issuesSolved: 0,
+      avgResolutionHours: 0,
+      over24HourCount: 0,
+      openIssues: 0,
+    }
+  }, [liveData, timeWindow])
 
   const allAssignees = useMemo(() => {
-    return Array.from(new Set(supportIssuesData.map((i) => i.assignee))).sort()
-  }, [])
+    return Array.from(new Set(issuesData.map((i) => i.assignee))).sort()
+  }, [issuesData])
 
   const filteredIssues = useMemo(() => {
-    return supportIssuesData.filter((issue) => {
+    return issuesData.filter((issue) => {
       if (filterAssignee !== "all" && issue.assignee !== filterAssignee) return false
       if (filterStatus !== "all" && issue.status !== filterStatus) return false
       if (filterPriority !== "all" && issue.priority !== filterPriority) return false
-      // Filter by time window
-      const openedDate = new Date(issue.dateOpened.replace(/(\d{2})\/(\d{2})\/(\d{2})/, "20$3-$1-$2"))
-      const daysAgo = Math.floor((Date.now() - openedDate.getTime()) / (1000 * 60 * 60 * 24))
-      return daysAgo <= parseInt(timeWindow)
+      // Skip time-window filter for live data (already windowed by API)
+      if (!liveData) {
+        return true
+      }
+      return true
     })
-  }, [filterAssignee, filterStatus, filterPriority, timeWindow])
+  }, [issuesData, filterAssignee, filterStatus, filterPriority, timeWindow, liveData])
 
   const unresolvedIssues = filteredIssues.filter((i) => i.status !== "Resolved")
   const over24HourIssues = filteredIssues.filter((i) => i.exceeds24Hours)
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <p className="text-muted-foreground">Loading Support data...</p>
+      </div>
+    )
+  }
 
   return (
     <TooltipProvider>
@@ -240,7 +290,7 @@ export function SupportDashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {supportMemberStats
+                  {memberStats
                     .slice()
                     .sort((a, b) => b.weightedPace - a.weightedPace)
                     .map((member, idx) => (
