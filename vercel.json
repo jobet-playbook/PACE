@@ -1,12 +1,32 @@
 {
   "crons": [
     {
-      "path": "/api/qa-metrics/sync",
-      "schedule": "0 11 * * 1-5"
+      "path": "/api/qa-metrics/sync?mode=incremental",
+      "schedule": "7 * * * 1-5"
     },
     {
-      "path": "/api/code-review-metrics/sync",
-      "schedule": "0 11 * * 1-5"
+      "path": "/api/qa-metrics/sync?mode=full",
+      "schedule": "7 11 * * 1-5"
+    },
+    {
+      "path": "/api/code-review-metrics/sync?mode=incremental",
+      "schedule": "17 * * * 1-5"
+    },
+    {
+      "path": "/api/code-review-metrics/sync?mode=full",
+      "schedule": "17 11 * * 1-5"
+    },
+    {
+      "path": "/api/documentation-metrics/sync?mode=incremental",
+      "schedule": "27 * * * 1-5"
+    },
+    {
+      "path": "/api/documentation-metrics/sync?mode=full",
+      "schedule": "27 11 * * 1-5"
+    },
+    {
+      "path": "/api/support-metrics/sync",
+      "schedule": "37 * * * 1-5"
     }
   ]
 }

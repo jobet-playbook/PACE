@@ -396,13 +396,24 @@ export class CodeReviewWorkflowProcessor {
    * Fetch and compute all CR metrics.
    * Windows: w7 (last 7d), prior_w7 (7–14d ago), w28 (last 28d), exclusions (28d pushbacks).
    */
-  async processAll(): Promise<CRData> {
-    const [w7Tickets, priorW7Tickets, w28Tickets, exclusions] = await Promise.all([
-      this.fetchFinalTickets(7, 0),
-      this.fetchFinalTickets(7, 7),
-      this.fetchFinalTickets(28, 0),
-      this.fetchPushbackTickets(28, 0),
-    ])
+  async processAll(mode: 'full' | 'incremental' = 'full'): Promise<CRData> {
+    let w7Tickets, priorW7Tickets, w28Tickets, exclusions
+
+    if (mode === 'incremental') {
+      // Incremental: only fetch w7 (2 queries instead of 4)
+      console.log('📊 [CR] Incremental mode — fetching w7 only')
+      w7Tickets = await this.fetchFinalTickets(7, 0)
+      priorW7Tickets = []
+      w28Tickets = w7Tickets // Use w7 as approximation for w28 in incremental
+      exclusions = []
+    } else {
+      ;[w7Tickets, priorW7Tickets, w28Tickets, exclusions] = await Promise.all([
+        this.fetchFinalTickets(7, 0),
+        this.fetchFinalTickets(7, 7),
+        this.fetchFinalTickets(28, 0),
+        this.fetchPushbackTickets(28, 0),
+      ])
+    }
 
     const w7     = this.computeWindowMetrics(w7Tickets)
     const priorW7 = this.computeWindowMetrics(priorW7Tickets)

@@ -693,13 +693,19 @@ export class JiraWorkflowProcessor {
   }
 
   /**
-   * Process all rollback windows
+   * Process rollback windows.
+   * @param windowKeys — if provided, only process these window keys (e.g. ['w7'] for incremental).
+   *                     w1 and prior_w1 daily windows are always processed.
    */
-  async processAllWindows(): Promise<Record<string, RollbackWindowData>> {
+  async processAllWindows(windowKeys?: string[]): Promise<Record<string, RollbackWindowData>> {
     const results: Record<string, RollbackWindowData> = {}
 
     // Run main windows sequentially to avoid overwhelming Jira rate limits
-    for (const window of ROLLBACK_WINDOWS) {
+    const windowsToProcess = windowKeys
+      ? ROLLBACK_WINDOWS.filter(w => windowKeys.includes(w.key))
+      : ROLLBACK_WINDOWS
+
+    for (const window of windowsToProcess) {
       results[window.key] = await this.processRollbackWindow(window)
     }
 

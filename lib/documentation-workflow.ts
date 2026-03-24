@@ -566,14 +566,27 @@ export class DocumentationWorkflowProcessor {
    * Fetch and compute all Documentation metrics.
    * Windows: w7 (last 7d), prior_w7 (7–14d ago), w28 (last 28d).
    */
-  async processAll(): Promise<DocData> {
-    const [w7Tickets, priorW7Tickets, w28Tickets, exclusions, wipTickets] = await Promise.all([
-      this.fetchFinalTickets(7, 0),
-      this.fetchFinalTickets(7, 7),
-      this.fetchFinalTickets(28, 0),
-      this.fetchPushbackTickets(28, 0),
-      this.fetchWIPTickets(28),
-    ])
+  async processAll(mode: 'full' | 'incremental' = 'full'): Promise<DocData> {
+    let w7Tickets, priorW7Tickets, w28Tickets, exclusions, wipTickets
+
+    if (mode === 'incremental') {
+      console.log('📊 [Doc] Incremental mode — fetching w7 + WIP only')
+      ;[w7Tickets, wipTickets] = await Promise.all([
+        this.fetchFinalTickets(7, 0),
+        this.fetchWIPTickets(28),
+      ])
+      priorW7Tickets = []
+      w28Tickets = w7Tickets
+      exclusions = []
+    } else {
+      ;[w7Tickets, priorW7Tickets, w28Tickets, exclusions, wipTickets] = await Promise.all([
+        this.fetchFinalTickets(7, 0),
+        this.fetchFinalTickets(7, 7),
+        this.fetchFinalTickets(28, 0),
+        this.fetchPushbackTickets(28, 0),
+        this.fetchWIPTickets(28),
+      ])
+    }
 
     const w7      = this.computeWindowMetrics(w7Tickets)
     const priorW7 = this.computeWindowMetrics(priorW7Tickets)

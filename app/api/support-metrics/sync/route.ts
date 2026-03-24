@@ -2,17 +2,19 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { createFrontClient } from '@/lib/front-client'
 import { processSupport } from '@/lib/support-workflow'
-import { writeSupportToDb } from '@/lib/support-metrics-db'
+import { writeSupportToDb, getLastSyncedAt, mergeSupportIncremental } from '@/lib/support-metrics-db'
 import { cachePool } from '@/lib/cache-pool'
 
+const INCREMENTAL_MAX_AGE_MS = 23 * 60 * 60 * 1000 // 23h — beyond this, do full sync
+
 /**
- * POST /api/support-metrics/sync
+ * POST /api/support-metrics/sync?mode=full|incremental
  *
- * Fetches fresh Support metrics from Front API, writes to normalized
- * pace_support_* tables, then invalidates the memory cache.
+ * Incremental (default): only fetch conversations archived since last sync,
+ *   merge into existing DB data, recompute agent stats.
+ * Full: re-fetch everything (7-day window), replace all DB data.
  *
- * Called by Vercel cron (see vercel.json) and optionally a manual Refresh button.
- * Auth: Bearer token from CRON_SECRET env var.
+ * Called by Vercel cron (GET with auth header delegates here).
  */
 export async function POST(request: NextRequest) {
   // ── Auth ──────────────────────────────────────────────────────────────────
@@ -43,30 +45,73 @@ export async function POST(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const days = parseInt(searchParams.get('days') ?? '7', 10)
   const inbox = searchParams.get('inbox') ?? inboxIds[0]
+  const forceMode = searchParams.get('mode') // 'full' | 'incremental' | null
 
   try {
-    console.log('🔄 [Support Sync] Starting at:', new Date().toISOString())
-
-    const client = createFrontClient()
-    // skipEvents=true halves API calls — resolved/archived filter is sufficient for sync
-    const data = await processSupport(client, inbox, days, { skipEvents: true })
-
     const supabase = createClient(supabaseUrl, supabaseKey)
-    await writeSupportToDb(supabase, data)
-
+    const client = createFrontClient()
     const cacheKey = `support-metrics:live:${days}:${inbox}`
-    await cachePool.clear(cacheKey)
-    console.log('✅ [Support Sync] Done. Cache cleared.')
 
-    return NextResponse.json({
-      success: true,
-      synced_at: new Date().toISOString(),
-      stats: {
-        total_tickets_resolved: data.total_tickets_resolved,
-        agents: data.by_agent.length,
-        avg_cycle_time: data.overall.avg_cycle_time,
-      },
-    })
+    // Decide: incremental or full
+    let useIncremental = forceMode !== 'full'
+    let lastSync: Awaited<ReturnType<typeof getLastSyncedAt>> = null
+
+    if (useIncremental) {
+      lastSync = await getLastSyncedAt(supabase)
+      // Fall back to full if no previous sync or too old
+      if (!lastSync || (Date.now() - lastSync.lastSyncedAt.getTime()) > INCREMENTAL_MAX_AGE_MS) {
+        useIncremental = false
+        console.log('🔄 [Support Sync] No recent sync found — doing full fetch')
+      }
+    }
+
+    if (useIncremental && lastSync) {
+      // ── Incremental sync ─────────────────────────────────────────────────
+      const sinceUnix = Math.floor(lastSync.lastSyncedAt.getTime() / 1000)
+      console.log(`🔄 [Support Sync] Incremental since ${lastSync.lastSyncedAt.toISOString()}`)
+
+      const data = await processSupport(client, inbox, days, {
+        skipEvents: true,
+        sinceTimestamp: sinceUnix,
+      })
+
+      if (data.issues.length === 0) {
+        console.log('✅ [Support Sync] Incremental: no new conversations')
+        // Still update last_synced_at
+        await supabase
+          .from('pace_support_daily_reports')
+          .update({ last_synced_at: new Date().toISOString() })
+          .eq('id', lastSync.reportId)
+      } else {
+        await mergeSupportIncremental(supabase, lastSync.reportId, data.issues)
+      }
+
+      await cachePool.clear(cacheKey)
+      return NextResponse.json({
+        success: true,
+        mode: 'incremental',
+        synced_at: new Date().toISOString(),
+        new_conversations: data.issues.length,
+      })
+    } else {
+      // ── Full sync ────────────────────────────────────────────────────────
+      console.log('🔄 [Support Sync] Full fetch starting')
+      const data = await processSupport(client, inbox, days, { skipEvents: true })
+
+      await writeSupportToDb(supabase, data)
+      await cachePool.clear(cacheKey)
+
+      return NextResponse.json({
+        success: true,
+        mode: 'full',
+        synced_at: new Date().toISOString(),
+        stats: {
+          total_tickets_resolved: data.total_tickets_resolved,
+          agents: data.by_agent.length,
+          avg_cycle_time: data.overall.avg_cycle_time,
+        },
+      })
+    }
   } catch (error) {
     console.error('❌ [Support Sync] Error:', error)
     return NextResponse.json(
@@ -80,7 +125,13 @@ export async function POST(request: NextRequest) {
  * GET /api/support-metrics/sync
  * Returns the timestamp of the most recent support report.
  */
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
+  const expectedToken = process.env.CRON_SECRET
+  const authHeader = request.headers.get('authorization')
+  if (expectedToken && authHeader === `Bearer ${expectedToken}`) {
+    return POST(request)
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!supabaseUrl || !supabaseKey) {

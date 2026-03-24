@@ -292,6 +292,8 @@ function extractClientName(conv: FrontConversation, messages: FrontMessage[]): s
 export interface ProcessSupportOptions {
   /** Skip event-based filtering to halve API calls. Default: false */
   skipEvents?: boolean
+  /** Unix timestamp (seconds). If provided, only fetch conversations archived after this time. */
+  sinceTimestamp?: number
 }
 
 export async function processSupport(
@@ -300,13 +302,25 @@ export async function processSupport(
   windowDays: number,
   options: ProcessSupportOptions = {}
 ): Promise<SupportMetricsData> {
-  const { skipEvents = false } = options
-  const afterUnix = Math.floor((Date.now() - windowDays * 24 * 60 * 60 * 1000) / 1000)
+  const { skipEvents = false, sinceTimestamp } = options
+  const afterUnix = sinceTimestamp ?? Math.floor((Date.now() - windowDays * 24 * 60 * 60 * 1000) / 1000)
   const query = `inbox:${inboxId} is:archived after:${afterUnix}`
+  const isIncremental = !!sinceTimestamp
 
   // ── Step 1: Search archived conversations ────────────────────────────
-  console.log(`📬 [Support] Searching Front: ${query}`)
-  const allConvs = await client.searchConversations(query)
+  console.log(`📬 [Support] ${isIncremental ? 'Incremental' : 'Full'} fetch: ${query}`)
+  const rawConvs = await client.searchConversations(query)
+
+  // Deduplicate by conversation ID (Front can return dupes across pages)
+  const seenIds = new Set<string>()
+  const allConvs = rawConvs.filter(c => {
+    if (seenIds.has(c.id)) return false
+    seenIds.add(c.id)
+    return true
+  })
+  if (rawConvs.length !== allConvs.length) {
+    console.log(`📬 [Support] Deduplicated ${rawConvs.length} → ${allConvs.length} conversations`)
+  }
 
   // ── Step 2: Filter by resolved status ────────────────────────────────
   const resolvedConvs = allConvs.filter(c =>
@@ -379,7 +393,7 @@ export async function processSupport(
     totalPacePoints += score
 
     issues.push({
-      id: conv.subject ? `SUP-${conv.id.slice(-4).toUpperCase()}` : conv.id,
+      id: `SUP-${conv.id}`,
       frontConversationId: conv.id,
       clientName: extractClientName(conv, messages),
       summary: conv.subject || 'No subject',

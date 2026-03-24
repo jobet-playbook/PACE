@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { createJiraClient } from '@/lib/jira-client'
 import { JiraWorkflowProcessor } from '@/lib/jira-workflow'
 import { cachePool, CacheKeys } from '@/lib/cache-pool'
-import { writeToNormalizedTables } from '@/lib/qa-metrics-db'
+import { writeToNormalizedTables, readFromNormalizedTables } from '@/lib/qa-metrics-db'
 
 /**
  * POST /api/qa-metrics/sync
@@ -49,14 +49,35 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    console.log('🔄 [Sync] Starting Jira sync at:', new Date().toISOString())
+    const { searchParams } = new URL(request.url)
+    const mode = searchParams.get('mode') ?? 'full'
+    const isIncremental = mode === 'incremental'
+
+    console.log(`🔄 [Sync] Starting ${isIncremental ? 'incremental' : 'full'} Jira sync at:`, new Date().toISOString())
 
     // ── Fetch & process from Jira ─────────────────────────────────────────
     const jiraClient = createJiraClient()
     const processor = new JiraWorkflowProcessor(jiraClient)
 
-    console.log('📊 [Sync] Processing rollback windows...')
-    const rollback_windows = await processor.processAllWindows()
+    // Incremental: only fetch w7 + daily windows (skip w28, prior_w7, prior_w28)
+    // Full: fetch all 6 windows
+    const windowFilter = isIncremental ? ['w7'] : undefined
+    console.log(`📊 [Sync] Processing ${isIncremental ? 'w7 + daily' : 'all'} rollback windows...`)
+    let rollback_windows = await processor.processAllWindows(windowFilter)
+
+    // In incremental mode, merge with existing DB data for missing windows
+    if (isIncremental) {
+      const supabase = createClient(supabaseUrl, supabaseKey)
+      const existing = await readFromNormalizedTables(supabase)
+      if (existing?.rollback_windows) {
+        // Keep cached w28/prior windows, overlay fresh w7/w1/prior_w1
+        rollback_windows = {
+          ...existing.rollback_windows,
+          ...rollback_windows,
+        }
+        console.log('📊 [Sync] Merged fresh w7+daily with cached w28/prior windows')
+      }
+    }
 
     // Deduplicate critical / old WIP tickets across windows
     const seenCritical = new Set<string>()
@@ -140,6 +161,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      mode,
       synced_at: new Date().toISOString(),
       stats: {
         rollback_windows: Object.keys(rollback_windows).length,
@@ -164,9 +186,18 @@ export async function POST(request: NextRequest) {
 
 /**
  * GET /api/qa-metrics/sync
- * Returns the timestamp of the most recent daily report.
+ *
+ * If called with a valid Authorization header (Vercel cron), triggers a sync.
+ * Otherwise returns the last sync timestamp.
  */
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
+  // Vercel cron sends Authorization: Bearer <CRON_SECRET>
+  const expectedToken = process.env.CRON_SECRET
+  const authHeader = request.headers.get('authorization')
+  if (expectedToken && authHeader === `Bearer ${expectedToken}`) {
+    return POST(request)
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 

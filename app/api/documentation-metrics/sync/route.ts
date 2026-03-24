@@ -38,11 +38,14 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    console.log('🔄 [Doc Sync] Starting at:', new Date().toISOString())
+    const { searchParams } = new URL(request.url)
+    const mode = (searchParams.get('mode') ?? 'full') as 'full' | 'incremental'
+
+    console.log(`🔄 [Doc Sync] Starting ${mode} sync at:`, new Date().toISOString())
 
     const jiraClient = createJiraClient()
     const processor  = new DocumentationWorkflowProcessor(jiraClient)
-    const docData    = await processor.processAll()
+    const docData    = await processor.processAll(mode)
 
     const supabase = createClient(supabaseUrl, supabaseKey)
     await writeDocToNormalizedTables(supabase, docData)
@@ -52,6 +55,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      mode,
       synced_at: new Date().toISOString(),
       stats: {
         w7_total_tickets: docData.w7.total_tickets,
@@ -75,7 +79,13 @@ export async function POST(request: NextRequest) {
  * GET /api/documentation-metrics/sync
  * Returns the timestamp of the most recent Doc snapshot.
  */
-export async function GET(_request: NextRequest) {
+export async function GET(request: NextRequest) {
+  const expectedToken = process.env.CRON_SECRET
+  const authHeader = request.headers.get('authorization')
+  if (expectedToken && authHeader === `Bearer ${expectedToken}`) {
+    return POST(request)
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!supabaseUrl || !supabaseKey) {

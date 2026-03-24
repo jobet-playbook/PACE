@@ -88,19 +88,28 @@ export function SupportDashboard({ liveData, loading }: SupportDashboardProps = 
   // Map live data to existing UI types when available
   const issuesData: SupportIssue[] = useMemo(() => {
     if (!liveData) return []
-    return liveData.issues.map(i => ({
-      id: i.id,
-      clientName: i.clientName,
-      summary: i.summary,
-      priority: i.priority,
-      weight: i.weight,
-      status: i.status,
-      assignee: i.assignee,
-      dateOpened: i.dateOpened,
-      dateResolved: i.dateResolved,
-      hoursToResolve: i.hoursToResolve,
-      exceeds24Hours: i.exceeds24Hours,
-    }))
+    // Deduplicate by frontConversationId (Front can return dupes across pages)
+    const seen = new Set<string>()
+    return liveData.issues
+      .filter(i => {
+        const key = i.frontConversationId
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      .map(i => ({
+        id: i.frontConversationId ?? i.id,
+        clientName: i.clientName,
+        summary: i.summary,
+        priority: i.priority,
+        weight: i.weight,
+        status: i.status,
+        assignee: i.assignee,
+        dateOpened: i.dateOpened,
+        dateResolved: i.dateResolved,
+        hoursToResolve: i.hoursToResolve,
+        exceeds24Hours: i.exceeds24Hours,
+      }))
   }, [liveData])
 
   const memberStats = useMemo(() => {
@@ -455,8 +464,8 @@ function IssuesTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {issues.map((issue) => (
-              <TableRow key={issue.id} className={cn("hover:bg-muted/30", issue.exceeds24Hours && "bg-destructive/5")}>
+            {issues.map((issue, idx) => (
+              <TableRow key={idx} className={cn("hover:bg-muted/30", issue.exceeds24Hours && "bg-destructive/5")}>
                 <TableCell className="text-[10px] py-1.5 font-medium text-primary">{issue.id}</TableCell>
                 <TableCell className="text-[10px] py-1.5 font-medium">{issue.clientName}</TableCell>
                 <TableCell className="text-[10px] py-1.5 max-w-[200px] truncate" title={issue.summary}>
